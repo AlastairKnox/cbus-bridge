@@ -106,6 +106,7 @@ class BridgeDiagnostics:
         self.wall = wall or time.time
         self.started = self.clock()
         self.counters = Counter()
+        self.unsupported_samples = {}
         self.recent = deque(maxlen=20)
         self.buckets = deque(maxlen=61)
         self.tx_buckets = deque(maxlen=61)
@@ -123,6 +124,7 @@ class BridgeDiagnostics:
             'last_bus_ts': None, 'last_bus_mono': None, 'last_publish_ts': None,
             'published_level': None, 'source': 'unknown', 'confidence': 'unknown',
             'pending_since': None, 'status_quality': 'not_requested',
+            'profile_kind': 'writable' if p.command_topic else 'read_only',
         } for p in profiles.values()}
 
     def bump(self, name, count=1):
@@ -187,7 +189,7 @@ class BridgeDiagnostics:
             for state in self.groups.values():
                 if state['app'] == app and start <= state['group'] < start + 32:
                     state['pending_since'] = self.clock()
-                    state['status_quality'] = 'awaiting_valid_level'
+                    state['status_quality'] = 'awaiting_reply'
 
     def status(self, reply):
         with self.lock:
@@ -200,8 +202,10 @@ class BridgeDiagnostics:
                 for state in self.groups.values():
                     if state['app'] == reply.app and state['group'] == group:
                         state['status_quality'] = quality
+                        # A reply was received, even if it reports no output or a
+                        # corrupt encoding. Keep those distinct from no response.
+                        state['pending_since'] = None
                         if level is not None:
-                            state['pending_since'] = None
                             state['last_bus_ts'] = int(self.wall())
                             state['last_bus_mono'] = self.clock()
 
@@ -232,6 +236,9 @@ class BridgeDiagnostics:
                     'tx_frames_per_second_60s': round(sum(n for sec, n in self.tx_buckets if sec > int(now) - 60) / elapsed, 3),
                     'configured_groups': len(self.groups), 'status_pending_groups': len(pending),
                     'status_overdue_groups': sum(now - s['pending_since'] >= 15 for s in pending),
+                    'status_absent_configured_groups': sum(s['status_quality'] == 'absent' for s in self.groups.values()),
+                    'status_invalid_configured_groups': sum(s['status_quality'] == 'invalid_encoding' for s in self.groups.values()),
+                    'unsupported_samples': [dict(s) for s in self.unsupported_samples.values()],
                     'groups_never_observed': sum(s['last_bus_ts'] is None for s in self.groups.values()),
                     'groups_with_reported_level': sum(s['confidence'] == 'reported_level' for s in self.groups.values())}
 
@@ -258,6 +265,27 @@ class BridgeDiagnostics:
             return {'schema': 1, 'ts': int(self.wall()), 'sequence': self.sequence,
                     'events_since_publish': unseen, 'events': list(self.recent)}
 
+    def sample_unsupported(self, hexline):
+        import hashlib
+        if not re.fullmatch(r'[0-9A-Fa-f]+', hexline) or len(hexline) % 2:
+            return
+        data = bytes.fromhex(hexline)
+        key = hashlib.sha256(data).hexdigest()
+        with self.lock:
+            if key not in self.unsupported_samples:
+                if len(self.unsupported_samples) >= 16:
+                    self.unsupported_samples.pop(next(iter(self.unsupported_samples)))
+                    self.counters['unsupported_sample_evictions_total'] += 1
+                self.unsupported_samples[key] = {
+                    'id': key[:12], 'hex': hexline[:160].upper(), 'bytes': len(data),
+                    'truncated': len(hexline) > 160, 'header': data[0],
+                    'application': data[2] if data[0] == 5 and len(data) > 2 else None,
+                    'first_ts': int(self.wall()), 'count': 0,
+                }
+            sample = self.unsupported_samples[key]
+            sample['count'] += 1
+            sample['last_ts'] = int(self.wall())
+
     def publish_traffic(self, client, topic, connected):
         import json
         view = self.traffic_snapshot(connected=connected)
@@ -266,3 +294,125 @@ class BridgeDiagnostics:
         result = client.publish(topic, json.dumps(view), qos=0, retain=False)
         if result.rc != 0:
             self.bump('traffic_publish_failures_total')
+
+
+class CommandRejected(Exception):
+    """A queued operation is no longer authorized for this connection session."""
+
+
+class CommandWorker:
+    """One bounded FIFO; no retry/replay across link loss or expired deadlines."""
+    def __init__(self, diagnostics, capacity=32, ttl=5., clock=None, cancel=None):
+        import threading
+        import time
+        from collections import deque
+        self.condition = threading.Condition(threading.RLock())
+        self.items = deque()
+        self.capacity, self.ttl = capacity, ttl
+        self.clock = clock or time.monotonic
+        self.diagnostics = diagnostics
+        self.cancel = cancel or (lambda: None)
+        self.links = {'mqtt': False, 'cni': False}
+        self.generation = 0
+        self.stopped = False
+        self.active = False
+        self.high_water = 0
+
+    def set_link(self, name, up):
+        with self.condition:
+            self.links[name] = up
+            if not up:
+                self.generation += 1
+                self.diagnostics.bump('queue_disconnect_discarded_total', len(self.items))
+                self.items.clear()
+            self.condition.notify_all()
+        if not up:
+            self.cancel()
+
+    def session_token(self):
+        with self.condition:
+            return self.generation
+
+    def ready_cni(self, token):
+        with self.condition:
+            if token != self.generation or self.stopped:
+                raise CommandRejected('session_changed')
+            self.links['cni'] = True
+
+    def submit(self, operation):
+        # Never wait behind a socket send in the MQTT callback. Reject rather than
+        # block if a short, bounded guarded send is currently in progress.
+        if not self.condition.acquire(blocking=False):
+            self.diagnostics.bump('queue_busy_rejected_total')
+            return False
+        try:
+            if self.stopped or not all(self.links.values()):
+                self.diagnostics.bump('queue_not_ready_rejected_total')
+                return False
+            if len(self.items) >= self.capacity:
+                self.diagnostics.bump('queue_full_rejected_total')
+                return False
+            self.items.append((self.generation, self.clock() + self.ttl, operation))
+            self.high_water = max(self.high_water, len(self.items))
+            self.diagnostics.bump('queue_accepted_total')
+            self.condition.notify()
+            return True
+        finally:
+            self.condition.release()
+
+    def snapshot(self):
+        with self.condition:
+            return {'depth': len(self.items), 'capacity': self.capacity,
+                    'high_water': self.high_water, 'active': self.active,
+                    'ready': not self.stopped and all(self.links.values()), 'ttl_s': self.ttl}
+
+    def run_one(self):
+        with self.condition:
+            if not self.items:
+                return False
+            generation, deadline, operation = self.items.popleft()
+            self.active = True
+        worker = self
+
+        class Lease:
+            def atomic(self, action, expire=True):
+                with worker.condition:
+                    if generation != worker.generation or worker.stopped or not all(worker.links.values()):
+                        raise CommandRejected('session_changed')
+                    if expire and worker.clock() >= deadline:
+                        raise CommandRejected('expired')
+                    return action()
+
+            def invalidate(self):
+                worker.set_link('cni', False)
+
+        lease = Lease()
+        try:
+            lease.atomic(lambda: None)
+            operation(lease)
+            self.diagnostics.bump('queue_completed_total')
+        except CommandRejected as exc:
+            self.diagnostics.bump('queue_' + str(exc) + '_discarded_total')
+        except Exception:
+            import logging
+            logging.getLogger("cbus_bridge").warning("Queued operation failed; discarding session work")
+            self.diagnostics.bump('queue_operation_failures_total')
+            # Do not execute remaining work after an ambiguous transport failure.
+            self.set_link('cni', False)
+        finally:
+            with self.condition:
+                self.active = False
+        return True
+
+    def run(self):
+        while True:
+            with self.condition:
+                self.condition.wait_for(lambda: self.stopped or bool(self.items))
+                if self.stopped:
+                    return
+            self.run_one()
+
+    def stop(self):
+        with self.condition:
+            self.stopped = True
+        self.set_link('cni', False)

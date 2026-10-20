@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 import yaml
 
 from cbus_bridge.bridge import CbusMqttBridge
-from cbus_bridge.ha_profiles import load_ha_mqtt_profiles
+from cbus_bridge.ha_profiles import load_ha_mqtt_profiles, GroupProfile
 from cbus_bridge import main as app
 
 
@@ -153,7 +153,8 @@ class StopRun(BaseException): pass
 
 class RetainTests(unittest.TestCase):
     def test_retained_device_and_resync_commands_are_ignored(self):
-        client, cni, bridge = Mock(), Mock(), Mock()
+        client, cni, bridge, worker = Mock(), Mock(), Mock(), Mock()
+        profile = GroupProfile(254, 56, 1, command_topic="cbus/write/254/56/1/switch")
         def loop_start():
             for retained in (True, False):
                 for topic, payload in [('cbus/write/254/56/1/switch', b'ON'), ('cbus/bridge/command', b'resync')]:
@@ -161,11 +162,14 @@ class RetainTests(unittest.TestCase):
             raise StopRun()
         client.loop_start.side_effect = loop_start
         cni.failover_status.return_value = {}
-        with patch.object(app, 'load_ha_mqtt_profiles', return_value={}), \
+        with patch.object(app, 'load_ha_mqtt_profiles', return_value={(254, 56, 1): profile}), \
+             patch.object(app, 'CommandWorker', return_value=worker), \
              patch.object(app.mqtt, 'Client', return_value=client), \
              patch.object(app, 'CniConnection', return_value=cni), \
              patch.object(app, 'CbusMqttBridge', return_value=bridge):
             with self.assertRaises(StopRun):
                 app.main(['--cni-host', 'unused', '--ha-config', 'unused'])
-        bridge.handle_mqtt_command.assert_called_once_with('cbus/write/254/56/1/switch', b'ON')
-        bridge.request_resync.assert_called_once_with(mode='configured')
+        # Only fresh device/resync messages reach the queue; no inline CNI work.
+        self.assertEqual(worker.submit.call_count, 2)
+        bridge.handle_mqtt_command.assert_not_called()
+        bridge.request_resync.assert_not_called()

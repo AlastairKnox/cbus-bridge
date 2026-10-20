@@ -227,7 +227,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Groups awaiting valid status
+    name: C-Bus Groups awaiting status reply
     unique_id: cbus_diag_pending_groups
     default_entity_id: sensor.cbus_diag_pending_groups
     value_template: '{{ value_json.diagnostics.status_pending_groups }}'
@@ -346,6 +346,66 @@ mqtt:
     default_entity_id: sensor.cbus_diag_groups
     value_template: '{{ value_json.ts }}'
     json_attributes_topic: cbus/bridge/status/groups
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Groups reported absent
+    unique_id: cbus_diag_absent_groups
+    default_entity_id: sensor.cbus_diag_absent_groups
+    value_template: "{{ value_json.diagnostics.status_absent_configured_groups }}"
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Groups with invalid status
+    unique_id: cbus_diag_invalid_groups
+    default_entity_id: sensor.cbus_diag_invalid_groups
+    value_template: "{{ value_json.diagnostics.status_invalid_configured_groups }}"
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Queued commands
+    unique_id: cbus_diag_queue_depth
+    default_entity_id: sensor.cbus_diag_queue_depth
+    value_template: "{{ value_json.command_queue.depth }}"
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Queue full rejections
+    unique_id: cbus_diag_queue_full
+    default_entity_id: sensor.cbus_diag_queue_full
+    value_template: "{{ value_json.diagnostics.counters.get('queue_full_rejected_total', 0) }}"
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Expired queued commands
+    unique_id: cbus_diag_queue_expired
+    default_entity_id: sensor.cbus_diag_queue_expired
+    value_template: "{{ value_json.diagnostics.counters.get('queue_expired_discarded_total', 0) }}"
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Queued commands discarded on disconnect
+    unique_id: cbus_diag_queue_discarded
+    default_entity_id: sensor.cbus_diag_queue_discarded
+    value_template: "{{ value_json.diagnostics.counters.get('queue_disconnect_discarded_total', 0) }}"
+    state_class: total_increasing
 recorder:
   exclude:
     entities:

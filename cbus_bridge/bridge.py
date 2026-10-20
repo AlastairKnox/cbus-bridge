@@ -14,6 +14,7 @@ from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_fra
 from .ha_profiles import GroupProfile
 from .utils import (
     BridgeDiagnostics,
+    CommandRejected,
     clamp,
     checksum_2s_complement,
     level255_to_pct,
@@ -95,6 +96,34 @@ class CbusMqttBridge:
 
         # Ensure only one write is in flight at a time (simplifies ACK attribution)
         self._write_lock = threading.Lock()
+        self._command_local = threading.local()
+        self._read_generation = 0
+
+    def execute_queued(self, operation, lease):
+        self._command_local.lease = lease
+        try:
+            return operation()
+        finally:
+            self._command_local.lease = None
+
+    def _guarded(self, operation, *, expire=True):
+        lease = getattr(self._command_local, 'lease', None)
+        return lease.atomic(operation, expire=expire) if lease is not None else operation()
+
+    def cancel_session(self):
+        with self._pending_synthetic_lock:
+            self._read_generation += 1
+            timers = list(self._pending_synthetic_timers.values())
+            self._pending_synthetic_timers.clear()
+            for timer in timers:
+                timer.cancel()
+        with self._ack_lock:
+            for waiter in self._ack_waiters.values():
+                waiter.result = 'cancelled'
+                waiter.event.set()
+        # Closing the old socket prevents late ACKs from being reused by a new
+        # session. No commands are retried on the replacement connection.
+        self.cni.close()
 
     # ----------------------------
     # Profile helpers (including friendly names for logging)
@@ -176,11 +205,14 @@ class CbusMqttBridge:
     ) -> None:
         key = (int(app), int(group))
 
+        generation = self._read_generation
+
         def publish_if_still_pending() -> None:
             with self._pending_synthetic_lock:
-                if self._pending_synthetic_timers.pop(key, None) is not timer:
+                if generation != self._read_generation or self._pending_synthetic_timers.get(key) is not timer:
                     return
-            self.handle_cbus_level_update(app=app, group=group, level255=level255, source=source)
+                self._pending_synthetic_timers.pop(key, None)
+                self.handle_cbus_level_update(app=app, group=group, level255=level255, source=source)
 
         timer = threading.Timer(delay_s, publish_if_still_pending)
         timer.daemon = True
@@ -200,6 +232,12 @@ class CbusMqttBridge:
         self.mqtt.publish(self._topic_for(p, "state"), payload=payload, retain=True, qos=1)
 
     def publish_level(self, p: GroupProfile, level255: int, *, source: str = "ACK") -> None:
+        if source == 'ACK':
+            self._guarded(lambda: self._publish_level(p, level255, source=source), expire=False)
+        else:
+            self._publish_level(p, level255, source=source)
+
+    def _publish_level(self, p: GroupProfile, level255: int, *, source: str) -> None:
         """
         Publish readbacks matching HA expectations.
 
@@ -348,10 +386,12 @@ class CbusMqttBridge:
             self.diagnostics.bump("command_attempts_total")
             started = time.monotonic()
             try:
-                self.cni.send_hex_frame(payload)
+                self._guarded(lambda: self.cni.send_hex_frame(payload))
                 self.diagnostics.tx("lighting_command", app=app_byte, group=group, command=cmd,
                                     level=level, tag=tag, hex=payload[:-1])
                 got, res = self._await_ack(tag, waiter)
+            except CommandRejected:
+                raise
             except Exception:
                 self.diagnostics.bump("command_send_failures_total")
                 self.diagnostics.event("command_result", "LOCAL", result="send_failure", tag=tag)
@@ -361,6 +401,9 @@ class CbusMqttBridge:
                 with self._ack_lock:
                     self._ack_waiters.pop(tag, None)
 
+        if res == 'cancelled':
+            raise CommandRejected('session_changed')
+        self._guarded(lambda: None, expire=False)
         outcome = "timeout" if not got else {".": "success", "#": "retries_exhausted", "$": "corruption", "%": "clock_loss", "!": "bang"}.get(res, "unknown")
         self.diagnostics.bump("command_" + outcome + "_total")
         if got:
@@ -369,6 +412,9 @@ class CbusMqttBridge:
         self.diagnostics.event("command_result", "LOCAL", app=app_byte, group=group, tag=tag,
                                result=outcome, elapsed_ms=round((time.monotonic() - started) * 1000, 1))
         if not got:
+            lease = getattr(self._command_local, 'lease', None)
+            if lease is not None:
+                lease.invalidate()  # discard queue and close socket before tag reuse
             LOG.warning(
                 "No ACK from CNI for tag=%s cmd=0x%02X group=%d level=%s%s",
                 tag, cmd, group, level, self._label_suffix_for(app_byte, group)
@@ -541,9 +587,13 @@ class CbusMqttBridge:
             cks = checksum_2s_complement(frame)
             payload = frame.hex().upper() + f"{cks:02X}"
             LOG.info("Requesting status start_group=%d (0x%02X)", start, start)
-            self.diagnostics.request(app_byte, start)
-            try:
+            def send_status():
+                self.diagnostics.request(app_byte, start)
                 self.cni.send_hex_frame(payload)
+            try:
+                self._guarded(send_status)
+            except CommandRejected:
+                raise
             except Exception:
                 self.diagnostics.bump("status_send_failures_total")
                 raise
@@ -571,9 +621,13 @@ class CbusMqttBridge:
             cks = checksum_2s_complement(frame)
             payload = frame.hex().upper() + f"{cks:02X}"
             LOG.info("Resync: requesting status start_group=%d (mode=%s)", start, mode)
-            self.diagnostics.request(app_byte, start)
-            try:
+            def send_status():
+                self.diagnostics.request(app_byte, start)
                 self.cni.send_hex_frame(payload)
+            try:
+                self._guarded(send_status)
+            except CommandRejected:
+                raise
             except Exception:
                 self.diagnostics.bump("status_send_failures_total")
                 raise
@@ -583,7 +637,7 @@ class CbusMqttBridge:
     # ----------------------------
     # Read loop: process ACK tokens + normal C-Bus traffic
     # ----------------------------
-    def run_forever(self, init: bool, status: bool, status_include_96: bool = False) -> None:
+    def run_forever(self, init: bool, status: bool, status_include_96: bool = False, on_ready=None) -> None:
         apps = {k[1] for k in self.profiles.keys()}
         app = 56 if 56 in apps else (next(iter(apps)) if apps else 56)
 
@@ -599,6 +653,9 @@ class CbusMqttBridge:
         while True:
             raw = self.cni.recv_line_bytes()
             if raw is None or not raw:
+                if raw is None and on_ready is not None:
+                    on_ready()
+                    on_ready = None
                 continue
 
             self.diagnostics.rx()
@@ -641,6 +698,8 @@ class CbusMqttBridge:
 
             category = diagnose_frame(norm)
             self.diagnostics.bump("rx_" + category + "_total")
+            if category == 'unsupported':
+                self.diagnostics.sample_unsupported(norm)
             self.diagnostics.event(category + "_frame", "RX", hex=norm[:160], truncated=len(norm) > 160)
             if norm != text_line.upper():
                 self.diagnostics.bump("normalized_tokens_total")

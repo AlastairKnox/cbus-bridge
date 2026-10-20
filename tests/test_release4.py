@@ -61,7 +61,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(self.d.traffic_snapshot()['events'], [])
         self.assertEqual(self.d.snapshot()['counters']['traffic_events_not_streamed_total'], 1)
 
-    def test_pending_coverage_requires_valid_status_not_ack_or_sal(self):
+    def test_pending_coverage_tracks_unanswered_replies_not_absence(self):
         self.d.request(56, 0)
         self.d.observed(56, 1)
         self.d.published(self.p, 255, 'ACK')
@@ -70,7 +70,8 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(self.d.snapshot()['status_overdue_groups'], 1)
         absent = parse_status_reply(packet([0xe5, 7, 56, 1, 0, 0]))
         self.d.status(absent)
-        self.assertEqual(self.d.snapshot()['status_pending_groups'], 1)
+        self.assertEqual(self.d.snapshot()['status_pending_groups'], 0)
+        self.assertEqual(self.d.snapshot()['status_absent_configured_groups'], 1)
         self.assertEqual(self.d.snapshot()['counters']['status_absent_groups_total'], 1)
         valid = parse_status_reply(packet([0xe5, 7, 56, 1, 0x55, 0x55]))
         self.d.status(valid)

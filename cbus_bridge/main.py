@@ -13,7 +13,7 @@ import paho.mqtt.client as mqtt
 from .ha_profiles import load_ha_mqtt_profiles
 from .cni_connection import CniConnection
 from .bridge import CbusMqttBridge
-from .utils import BridgeDiagnostics
+from .utils import BridgeDiagnostics, CommandWorker
 
 LOG = logging.getLogger("cbus_bridge")
 
@@ -173,6 +173,8 @@ def main(argv=None) -> int:
     bridge = CbusMqttBridge(cni=cni, mqtt_client=mc, profiles=profiles, readonly=readonly,
                             diagnostics=diagnostics)
 
+    worker = CommandWorker(diagnostics, cancel=bridge.cancel_session)
+
     def publish_availability(state: str, reason: str = "") -> None:
         mc.publish(args.availability_topic, payload=state, qos=1, retain=True)
         if reason:
@@ -209,6 +211,7 @@ def main(argv=None) -> int:
             "mqtt_connection_age_s": int(time.monotonic() - metrics.last_mqtt_connect_mono) if mqtt_up.is_set() and metrics.last_mqtt_connect_mono is not None else None,
             "cni_connection_age_s": int(time.monotonic() - metrics.last_cni_connect_mono) if cni_up.is_set() and metrics.last_cni_connect_mono is not None else None,
             "diagnostics": diagnostics.snapshot(),
+            "command_queue": worker.snapshot(),
 
             "last_mqtt_connect_ts": metrics.last_mqtt_connect_ts,
             "last_mqtt_disconnect_ts": metrics.last_mqtt_disconnect_ts,
@@ -243,6 +246,7 @@ def main(argv=None) -> int:
         rc_val = getattr(reason_code, "value", reason_code)
         if rc_val == 0:
             mqtt_up.set()
+            worker.set_link("mqtt", True)
             metrics.mqtt_connects_total += 1
             metrics.last_mqtt_connect_ts = now_epoch()
             metrics.last_mqtt_connect_mono = time.monotonic()
@@ -269,6 +273,7 @@ def main(argv=None) -> int:
     
     def on_disconnect(client, userdata, *args, **kwargs):
         mqtt_up.clear()
+        worker.set_link("mqtt", False)
         metrics.mqtt_disconnects_total += 1
         metrics.last_mqtt_disconnect_ts = now_epoch()
 
@@ -283,41 +288,41 @@ def main(argv=None) -> int:
         publish_status("mqtt_disconnected")
 
 
+    def perform_resync(mode):
+        metrics.resync_requests_total += 1
+        metrics.last_resync_ts = now_epoch()
+        metrics.last_resync_mode = mode
+        metrics.last_resync_error = None
+        bridge.request_resync(mode=mode)
+        publish_status("resync:" + mode)
+
+    command_topics = {topic for profile in profiles.values()
+                      for topic in (profile.command_topic, profile.level_command_topic) if topic}
+
+    def enqueue(operation):
+        return worker.submit(lambda lease: bridge.execute_queued(operation, lease))
+
     def on_message(client, userdata, msg):
         metrics.last_mqtt_rx_ts = now_epoch()
-
-        try:
-            if msg.retain:
-                diagnostics.bump("retained_commands_ignored_total")
-                LOG.warning("Ignoring retained MQTT command")
-                return
-            if msg.topic == args.resync_topic:
-                text = msg.payload.decode("utf-8", errors="ignore").strip().lower()
-
-                if text in ("resync", "sync", "status"):
-                    metrics.resync_requests_total += 1
-                    metrics.last_resync_ts = now_epoch()
-                    metrics.last_resync_mode = args.resync_mode
-                    metrics.last_resync_error = None
-                    bridge.request_resync(mode=args.resync_mode)
-                    publish_status(f"resync:{args.resync_mode}")
-                elif text in ("resync_full", "full"):
-                    metrics.resync_requests_total += 1
-                    metrics.last_resync_ts = now_epoch()
-                    metrics.last_resync_mode = "full"
-                    metrics.last_resync_error = None
-                    bridge.request_resync(mode="full")
-                    publish_status("resync:full")
-                else:
-                    LOG.info("Ignored resync command payload=%r", text)
-                return
-
-            bridge.handle_mqtt_command(msg.topic, msg.payload)
-
-        except Exception as e:
-            set_last_error(f"on_message error: {e!r}")
-            publish_status("on_message_error")
-            LOG.exception("Error handling MQTT message topic=%s", msg.topic)
+        if msg.retain:
+            diagnostics.bump("retained_commands_ignored_total")
+            return
+        if len(msg.payload) > 256 or len(msg.topic) > 128:
+            diagnostics.bump("oversized_commands_ignored_total")
+            return
+        if readonly:
+            diagnostics.bump("readonly_commands_ignored_total")
+            return
+        if msg.topic == args.resync_topic:
+            text = msg.payload.decode("utf-8", errors="ignore").strip().lower()
+            mode = ("full" if text in ("resync_full", "full") else
+                    args.resync_mode if text in ("resync", "sync", "status") else None)
+            if mode:
+                enqueue(lambda: perform_resync(mode))
+            return
+        if msg.topic in command_topics:
+            topic, payload = msg.topic, bytes(msg.payload)
+            enqueue(lambda: bridge.handle_mqtt_command(topic, payload))
 
     mc.on_connect = on_connect
     mc.on_disconnect = on_disconnect
@@ -326,6 +331,8 @@ def main(argv=None) -> int:
     LOG.info("Connecting to MQTT %s:%d", args.mqtt_host, args.mqtt_port)
     mc.connect(args.mqtt_host, args.mqtt_port, keepalive=60)
     mc.loop_start()
+    worker_thread = threading.Thread(target=worker.run, name="cbus-command-worker", daemon=True)
+    worker_thread.start()
 
     # ---- Periodic resync thread ----
     def resync_loop():
@@ -336,18 +343,7 @@ def main(argv=None) -> int:
             stop_event.wait(args.resync_every)
             if stop_event.is_set():
                 break
-            try:
-                metrics.resync_requests_total += 1
-                metrics.last_resync_ts = now_epoch()
-                metrics.last_resync_mode = args.resync_mode
-                metrics.last_resync_error = None
-                bridge.request_resync(mode=args.resync_mode)
-                publish_status(f"periodic_resync:{args.resync_mode}")
-            except Exception as e:
-                metrics.last_resync_error = f"{e!r}"
-                set_last_error(f"Periodic resync failed: {e!r}")
-                LOG.warning("Periodic resync failed: %s", e)
-                publish_status("periodic_resync_failed")
+            enqueue(lambda: perform_resync(args.resync_mode))
 
     if args.resync_every and args.resync_every > 0:
         threading.Thread(target=resync_loop, name="cbus-resync", daemon=True).start()
@@ -385,43 +381,52 @@ def main(argv=None) -> int:
         LOG.info("Diagnostics intervals: status=%ss, traffic=%ss", status_interval, args.traffic_every)
 
     # ---- CNI reconnect loop ----
-    while True:
-        try:
-            cni.connect()
-            diagnostics.reset_connection()
-            diagnostics.event("cni_connected", "LOCAL")
-            cni_up.set()
-            metrics.cni_connects_total += 1
-            metrics.last_cni_connect_ts = now_epoch()
-            metrics.last_cni_connect_mono = time.monotonic()
-
-            # Availability reason includes the active port (primary or secondary)
-            publish_availability(AVAIL_ONLINE, f"CNI connected (port {cni.active_port})")
-            publish_status("cni_connected")
-
-            bridge.run_forever(init=args.init, status=args.status, status_include_96=args.status_include_96)
-
-        except Exception as e:
-            was_connected = cni_up.is_set()
-            cni_up.clear()
-            if was_connected:
-                metrics.cni_disconnects_total += 1
-                metrics.last_cni_disconnect_ts = now_epoch()
-            else:
-                metrics.cni_connect_failures_total += 1
-            diagnostics.reset_connection()
-            diagnostics.event("cni_disconnected" if was_connected else "cni_connect_failure", "LOCAL")
-
-            set_last_error(f"CNI loop error: {e!r}")
-            publish_availability(AVAIL_OFFLINE, f"CNI loop error: {e}")
-            publish_status("cni_disconnected")
-
-            LOG.warning("CNI loop error: %s; reconnecting in 3s", e)
+    try:
+        while True:
             try:
-                cni.close()
-            except Exception:
-                pass
-            time.sleep(3)
+                session_token = worker.session_token()
+                cni.connect()
+                diagnostics.reset_connection()
+                diagnostics.event("cni_connected", "LOCAL")
+                cni_up.set()
+                metrics.cni_connects_total += 1
+                metrics.last_cni_connect_ts = now_epoch()
+                metrics.last_cni_connect_mono = time.monotonic()
+
+                # Availability reason includes the active port (primary or secondary)
+                publish_availability(AVAIL_ONLINE, f"CNI connected (port {cni.active_port})")
+                publish_status("cni_connected")
+
+                bridge.run_forever(init=args.init, status=args.status, status_include_96=args.status_include_96,
+                                   on_ready=lambda: worker.ready_cni(session_token))
+
+            except Exception as e:
+                worker.set_link("cni", False)
+                was_connected = cni_up.is_set()
+                cni_up.clear()
+                if was_connected:
+                    metrics.cni_disconnects_total += 1
+                    metrics.last_cni_disconnect_ts = now_epoch()
+                else:
+                    metrics.cni_connect_failures_total += 1
+                diagnostics.reset_connection()
+                diagnostics.event("cni_disconnected" if was_connected else "cni_connect_failure", "LOCAL")
+
+                set_last_error(f"CNI loop error: {e!r}")
+                publish_availability(AVAIL_OFFLINE, f"CNI loop error: {e}")
+                publish_status("cni_disconnected")
+
+                LOG.warning("CNI loop error: %s; reconnecting in 3s", e)
+                try:
+                    cni.close()
+                except Exception:
+                    pass
+                time.sleep(3)
+
+    finally:
+        stop_event.set()
+        worker.stop()
+        worker_thread.join(timeout=3)
 
 
 if __name__ == "__main__":
