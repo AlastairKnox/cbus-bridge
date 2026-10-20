@@ -1,6 +1,6 @@
 # C-Bus MQTT bridge
 
-Python bridge between a C-Bus CNI and MQTT, using Home Assistant MQTT YAML to define group profiles. Imported from the running cgate server on 20 October 2026.
+Python bridge between a C-Bus CNI and MQTT without using cgate or any other components, using Home Assistant MQTT YAML to define group profiles. Imported from the running cgate server on 20 October 2026.
 
 ## Working copy
 
