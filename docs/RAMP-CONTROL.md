@@ -1,3 +1,9 @@
+Ordinary numeric brightness commands and dimmer ON now use the immediate native
+rate across all configured dimmer groups (Release 9). Comma suffixes remain
+ignored. Explicit JSON ramp durations, physical wall-switch ramps and fan
+commands retain their existing behavior. Numeric readback still confirms dimmer
+state; an immediate command does not promise an immediate HA update.
+
 # Explicit native dimmer ramps (Release 6)
 
 Release 8 optionally adds automatic numeric readback and state priority; see

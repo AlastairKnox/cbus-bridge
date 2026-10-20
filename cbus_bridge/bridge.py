@@ -622,7 +622,7 @@ class CbusMqttBridge:
 
                 if is_dimmer:
                     level255 = p.last_nonzero_255 if p.last_nonzero_255 > 0 else 255
-                    ok = self.write_ramp_to_level(app_byte, group, level255=level255, ramp_cmd=self.dimmer_ramp_cmd)
+                    ok = self.write_ramp_to_level(app_byte, group, level255=level255, ramp_cmd=RAMP_CODES[0])
                     if ok:
                         self.publish_level(p, level255)
                     return
@@ -676,7 +676,7 @@ class CbusMqttBridge:
                 return
 
             level255 = pct_to_level255(level_pct, p.pct_scale)
-            ok = self.write_ramp_to_level(app_byte, group, level255=level255, ramp_cmd=self.dimmer_ramp_cmd)
+            ok = self.write_ramp_to_level(app_byte, group, level255=level255, ramp_cmd=RAMP_CODES[0])
             if ok:
                 self.publish_level(p, level255)
             return

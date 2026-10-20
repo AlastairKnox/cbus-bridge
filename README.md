@@ -21,7 +21,8 @@ The original runtime source and settings remain on cgate. Virtual environments, 
 For repeatable checks, installation and rollback, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 For explicit dimmer fade rates and stop-ramp commands (Release 6), see
-[docs/RAMP-CONTROL.md](docs/RAMP-CONTROL.md). Existing controls keep their behavior.
+[docs/RAMP-CONTROL.md](docs/RAMP-CONTROL.md). Release 9 makes ordinary dimmer
+brightness and ON commands immediate; explicit fades and fan rates are preserved.
 
 Release 7 adds configurable passive status monitoring; see
 [docs/PASSIVE-STATUS.md](docs/PASSIVE-STATUS.md) for the trial and its limits.

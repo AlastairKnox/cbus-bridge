@@ -125,13 +125,13 @@ class TransitionTests(unittest.TestCase):
         b.cni.send_hex_frame.assert_called_once()
         self.assertNotIn('last_transition', b.diagnostics.group_snapshot()['groups'][0])
 
-    def test_profile_scale_and_legacy_comma_behavior_preserved(self):
+    def test_profile_scale_and_legacy_comma_parsing_preserved(self):
         b, p = self.make_bridge(); p.pct_scale = 255
         self.send(b, {'level': 127, 'ramp_seconds': 4})
         self.assertEqual(bytes.fromhex(b.cni.send_hex_frame.call_args.args[0][:-1])[5], 127)
         b, p = self.make_bridge()
         b.handle_mqtt_command(self.topic, b'50,34')
-        self.assertEqual(bytes.fromhex(b.cni.send_hex_frame.call_args.args[0][:-1])[3], 0x0a)
+        self.assertEqual(bytes.fromhex(b.cni.send_hex_frame.call_args.args[0][:-1])[3], 0x02)
         self.assertTrue(b.mqtt.publish.called)
 
     def test_monitored_stop_cancels_timer_without_level_update(self):
