@@ -10,9 +10,10 @@ from typing import Dict, Optional, Tuple, Set, List
 import paho.mqtt.client as mqtt
 
 from .cni_connection import CniConnection
-from .cni_protocol import parse_monitored_sals, parse_status_reply
+from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame
 from .ha_profiles import GroupProfile
 from .utils import (
+    BridgeDiagnostics,
     clamp,
     checksum_2s_complement,
     level255_to_pct,
@@ -59,7 +60,9 @@ class CbusMqttBridge:
         readonly: bool,
         dimmer_ramp_cmd: int = 0x0A,  # ramp code
         ack_timeout_s: float = 2.5,
+        diagnostics=None,
     ):
+        self.diagnostics = diagnostics if diagnostics is not None else BridgeDiagnostics(profiles)
         self.cni = cni
         self.mqtt = mqtt_client
         self.profiles = profiles
@@ -196,7 +199,7 @@ class CbusMqttBridge:
         payload = "ON" if is_on else "OFF"
         self.mqtt.publish(self._topic_for(p, "state"), payload=payload, retain=True, qos=1)
 
-    def publish_level(self, p: GroupProfile, level255: int) -> None:
+    def publish_level(self, p: GroupProfile, level255: int, *, source: str = "ACK") -> None:
         """
         Publish readbacks matching HA expectations.
 
@@ -205,6 +208,7 @@ class CbusMqttBridge:
         none: publish state ON/OFF only.
         """
         level255 = clamp(int(level255), 0, 255)
+        self.diagnostics.published(p, level255, source)
 
         if p.level_mode == "pct":
             pct = level255_to_pct(level255, p.pct_scale)
@@ -258,7 +262,7 @@ class CbusMqttBridge:
                 LOG.debug("RX %s app=0x%02X group=%d level=%d (unchanged)%s", src, app_int, group_int, level_int, suffix)
 
             for p in ps:
-                self.publish_level(p, level_int)
+                self.publish_level(p, level_int, source=src)
         else:
             # Unconfigured: keep noise low
             if changed:
@@ -280,9 +284,12 @@ class CbusMqttBridge:
         return w
 
     def _complete_ack(self, tag: str, result: str) -> None:
+        outcome = {".": "success", "#": "retries_exhausted", "$": "corruption", "%": "clock_loss", "!": "bang"}.get(result, "unknown")
+        self.diagnostics.bump("ack_" + outcome + "_tokens_total")
         with self._ack_lock:
             w = self._ack_waiters.get(tag)
             if not w:
+                self.diagnostics.bump("ack_unmatched_total")
                 return
             w.result = result
             w.event.set()
@@ -291,6 +298,8 @@ class CbusMqttBridge:
         # With serialized writes, there should be at most one pending command.
         with self._ack_lock:
             tags = list(self._ack_waiters.keys())
+        if len(tags) != 1:
+            self.diagnostics.bump("ack_bang_tokens_total")
         if len(tags) == 1:
             self._complete_ack(tags[0], "!")
         elif len(tags) == 0:
@@ -322,6 +331,7 @@ class CbusMqttBridge:
                 "[readonly] Would send cmd=0x%02X group=%d level=%s%s",
                 cmd, group, level, self._label_suffix_for(app_byte, group)
             )
+            self.diagnostics.bump("readonly_commands_blocked_total")
             return False
 
         group = clamp(int(group), 0, 255)
@@ -335,14 +345,29 @@ class CbusMqttBridge:
         with self._write_lock:
             waiter = self._register_waiter(tag)
             payload = b.hex().upper() + f"{cks:02X}" + tag
+            self.diagnostics.bump("command_attempts_total")
+            started = time.monotonic()
             try:
                 self.cni.send_hex_frame(payload)
+                self.diagnostics.tx("lighting_command", app=app_byte, group=group, command=cmd,
+                                    level=level, tag=tag, hex=payload[:-1])
                 got, res = self._await_ack(tag, waiter)
+            except Exception:
+                self.diagnostics.bump("command_send_failures_total")
+                self.diagnostics.event("command_result", "LOCAL", result="send_failure", tag=tag)
+                raise
             finally:
                 # A failed send must not leave a waiter attributed to a later command.
                 with self._ack_lock:
                     self._ack_waiters.pop(tag, None)
 
+        outcome = "timeout" if not got else {".": "success", "#": "retries_exhausted", "$": "corruption", "%": "clock_loss", "!": "bang"}.get(res, "unknown")
+        self.diagnostics.bump("command_" + outcome + "_total")
+        if got:
+            self.diagnostics.bump("command_acks_completed_total")
+            self.diagnostics.bump("command_ack_latency_ms_sum", (time.monotonic() - started) * 1000)
+        self.diagnostics.event("command_result", "LOCAL", app=app_byte, group=group, tag=tag,
+                               result=outcome, elapsed_ms=round((time.monotonic() - started) * 1000, 1))
         if not got:
             LOG.warning(
                 "No ACK from CNI for tag=%s cmd=0x%02X group=%d level=%s%s",
@@ -395,6 +420,7 @@ class CbusMqttBridge:
 
         allowed_topic = p.command_topic if action == "switch" else p.level_command_topic
         if topic != allowed_topic:
+            self.diagnostics.bump("commands_not_enabled_total")
             LOG.warning("Ignoring command not enabled for this profile")
             return
 
@@ -487,15 +513,19 @@ class CbusMqttBridge:
             LOG.info("[readonly] Skipping CNI initialization")
             return
         self.cni.send_line("~~~")
+        self.diagnostics.tx("initialization")
         time.sleep(0.1)
         if app != 56:
             LOG.warning("Init strings are hard-coded for app=56 (0x38). You passed app=%d.", app)
 
         self.cni.send_line("A3210038g")
+        self.diagnostics.tx("initialization")
         time.sleep(0.05)
         self.cni.send_line("A3420002g")
+        self.diagnostics.tx("initialization")
         time.sleep(0.05)
         self.cni.send_line("A3300059g")
+        self.diagnostics.tx("initialization")
         time.sleep(0.05)
 
     def request_status_blocks(self, app_byte: int, groups: Set[int], include_96: bool = False) -> None:
@@ -511,7 +541,13 @@ class CbusMqttBridge:
             cks = checksum_2s_complement(frame)
             payload = frame.hex().upper() + f"{cks:02X}"
             LOG.info("Requesting status start_group=%d (0x%02X)", start, start)
-            self.cni.send_hex_frame(payload)
+            self.diagnostics.request(app_byte, start)
+            try:
+                self.cni.send_hex_frame(payload)
+            except Exception:
+                self.diagnostics.bump("status_send_failures_total")
+                raise
+            self.diagnostics.tx("status_request", app=app_byte, start_group=start, hex=payload)
             time.sleep(0.2)
 
     def request_resync(self, mode: str = "configured") -> None:
@@ -535,7 +571,13 @@ class CbusMqttBridge:
             cks = checksum_2s_complement(frame)
             payload = frame.hex().upper() + f"{cks:02X}"
             LOG.info("Resync: requesting status start_group=%d (mode=%s)", start, mode)
-            self.cni.send_hex_frame(payload)
+            self.diagnostics.request(app_byte, start)
+            try:
+                self.cni.send_hex_frame(payload)
+            except Exception:
+                self.diagnostics.bump("status_send_failures_total")
+                raise
+            self.diagnostics.tx("status_request", app=app_byte, start_group=start, hex=payload)
             time.sleep(0.2)
 
     # ----------------------------
@@ -559,10 +601,13 @@ class CbusMqttBridge:
             if raw is None or not raw:
                 continue
 
+            self.diagnostics.rx()
             # ACK tokens are returned as standalone "lines" by cni_connection
             text_line = raw.decode("ascii", errors="ignore").strip()
             if text_line:
                 if BANG_LINE_RE.match(text_line):
+                    self.diagnostics.bump("ack_tokens_total")
+                    self.diagnostics.event("ack", "RX", code="!")
                     LOG.debug("RX: '!'")
                     self._complete_bang()
                     continue
@@ -570,26 +615,38 @@ class CbusMqttBridge:
                 if ACK_LINE_RE.match(text_line):
                     tag = text_line[0]
                     res = text_line[1]
+                    self.diagnostics.bump("ack_tokens_total")
+                    self.diagnostics.event("ack", "RX", tag=tag, code=res)
                     LOG.debug("RX ACK token: %s%s", tag, res)
                     self._complete_ack(tag, res)
                     continue
 
                 # Some devices may echo commands; ignore echoes
                 if text_line.startswith("\\"):
+                    self.diagnostics.bump("echo_tokens_total")
+                    self.diagnostics.event("echo", "RX")
                     LOG.debug("RX echo ignored: %r", text_line)
                     continue
 
             # Normal hex traffic
             norm = normalize_hex_from_bytes(raw)
             if not norm:
+                self.diagnostics.bump("nonhex_tokens_total")
+                self.diagnostics.event("unclassified", "RX")
                 LOG.debug("RX non-hex/empty after normalize: raw=%r text=%r", raw, text_line)
                 continue
 
             # DEBUG: show every inbound non-ACK frame (parsed or not)
             LOG.debug("RX frame: raw=%r norm=%s", raw, norm)
 
+            category = diagnose_frame(norm)
+            self.diagnostics.bump("rx_" + category + "_total")
+            self.diagnostics.event(category + "_frame", "RX", hex=norm[:160], truncated=len(norm) > 160)
+            if norm != text_line.upper():
+                self.diagnostics.bump("normalized_tokens_total")
             sr = parse_status_reply(norm)
             if sr and sr.app == 0x38:
+                self.diagnostics.status(sr)
                 LOG.debug(
                     "RX status-reply: hdr=0x%02X coding=0x%02X app=0x%02X start_group=%d",
                     sr.hdr, sr.coding, sr.app, sr.start_group
@@ -603,6 +660,10 @@ class CbusMqttBridge:
 
             sals = parse_monitored_sals(norm)
             for sal in (item for item in sals if item.app == 0x38):
+                self.diagnostics.bump("lighting_commands_observed_total")
+                self.diagnostics.observed(sal.app, sal.group)
+                self.diagnostics.event("lighting", "RX", app=sal.app, group=sal.group,
+                                       unit=sal.dev, command=sal.cmd, level=sal.level)
                 if sal.level is not None:
                     lvl = sal.level
 

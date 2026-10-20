@@ -1,0 +1,83 @@
+# PROPOSED ONLY. Built-in cards, no HACS/custom frontend dependencies.
+title: C-Bus Observatory
+views:
+  - title: C-Bus Traffic
+    path: cbus-traffic
+    icon: mdi:lan
+    cards:
+      - type: markdown
+        title: C-Bus Observatory
+        content: >-
+          Live observations from the bridge, not a certification of the entire network.
+          Errors and counters are since bridge startup. Quiet groups are not automatically faulty.
+      - type: entities
+        title: Connection and traffic
+        entities:
+          - sensor.cbus_diag_cni_age
+          - sensor.cbus_diag_mqtt_age
+          - sensor.cbus_diag_last_rx_age
+          - sensor.cbus_diag_rx_rate
+          - sensor.cbus_diag_tx_rate
+          - sensor.cbus_diag_ack_ms
+          - sensor.cbus_diag_cni_reconnects
+          - sensor.cbus_diag_mqtt_reconnects
+      - type: history-graph
+        title: Traffic over time
+        hours_to_show: 2
+        entities:
+          - sensor.cbus_diag_rx_rate
+          - sensor.cbus_diag_tx_rate
+      - type: entities
+        title: Observed quality and synchronization
+        entities:
+          - sensor.cbus_diag_errors_5min
+          - sensor.cbus_diag_errors_total
+          - sensor.cbus_diag_rx_checksum_failure_total
+          - sensor.cbus_diag_rx_malformed_total
+          - sensor.cbus_diag_rx_unsupported_total
+          - sensor.cbus_diag_status_invalid_encoding_groups_total
+          - sensor.cbus_diag_command_timeout_total
+          - sensor.cbus_diag_command_retries_exhausted_total
+          - sensor.cbus_diag_command_corruption_total
+          - sensor.cbus_diag_command_clock_loss_total
+          - sensor.cbus_diag_pending_groups
+          - sensor.cbus_diag_overdue_groups
+          - sensor.cbus_diag_never_observed
+      - type: markdown
+        title: Live wire · latest 20 events
+        entity_id:
+          - sensor.cbus_diag_traffic
+        content: |-
+          {% if states('sensor.cbus_diag_traffic') in ['unknown', 'unavailable'] %}
+          **Live stream unavailable.** Waiting for fresh traffic-view heartbeats.
+          {% else %}
+          Updated {{ state_attr('sensor.cbus_diag_traffic', 'ts') | timestamp_custom('%H:%M:%S', true) }} · RX ← / TX → · sampled view, not a packet archive.
+
+          | Time | Direction | Event | Details |
+          | :--- | :---: | :--- | :--- |
+          {% for e in (state_attr('sensor.cbus_diag_traffic', 'events') or []) | reverse %}
+          | {{ e.ts | timestamp_custom('%H:%M:%S', true) }} | {{ '← RX' if e.direction == 'RX' else 'TX →' if e.direction == 'TX' else 'LOCAL' }} | {{ e.kind }} | {% if e.group is defined %}group {{ e.group }} {% endif %}{% if e.unit is defined %}unit {{ e.unit }} {% endif %}{% if e.command is defined %}cmd {{ '%02X' | format(e.command) }} {% endif %}{% if e.level is defined and e.level is not none %}level {{ e.level }} {% endif %}{% if e.code is defined %}{{ e.code }} {% endif %}{% if e.result is defined %}{{ e.result }} {% endif %}{% if e.start_group is defined %}block {{ e.start_group }} {% endif %}{% if e.hex is defined %}`{{ e.hex }}`{% endif %} |
+          {% endfor %}
+          {% endif %}
+      - type: entities
+        title: Stream sampling (not C-Bus errors)
+        entities:
+          - sensor.cbus_diag_traffic_events_sampled_out_total
+          - sensor.cbus_diag_traffic_events_not_streamed_total
+          - sensor.cbus_diag_diagnostic_publish_failures_total
+      - type: markdown
+        title: Group observation quality
+        entity_id:
+          - sensor.cbus_diag_groups
+        content: |-
+          {% if states('sensor.cbus_diag_groups') in ['unknown', 'unavailable'] %}
+          Waiting for a fresh group snapshot (every 30 seconds).
+          {% else %}
+          Reported level = C-Bus status. Observed command = a target, not measured output. Transmitted = successful command ACK only. Age is observation age, not a fault timeout.
+
+          | Group | Raw level (0–255) | Confidence | Observation age | Status |
+          | :--- | :--- | :--- | :--- | :--- |
+          {% for g in state_attr('sensor.cbus_diag_groups', 'groups') or [] %}
+          | {{ g.group }} | {{ g.published_level if g.published_level is not none else 'unknown' }} | {{ g.confidence }} | {{ (g.observation_age_s | string) + ' s' if g.observation_age_s is not none else 'never' }} | {{ g.status_quality }} |
+          {% endfor %}
+          {% endif %}

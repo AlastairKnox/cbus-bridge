@@ -18,4 +18,6 @@ exec python /opt/cbus_bridge/run_bridge.py \
   --resync-mode "${RESYNC_MODE}" \
   --availability-topic "${AVAIL_TOPIC}" \
   --status-topic "${STATUS_TOPIC}" \
-  --metrics-every "${METRICS_EVERY}"
+  --metrics-every "${METRICS_EVERY}" \
+  --diagnostics-every "${DIAGNOSTICS_EVERY:-5}" \
+  --traffic-every "${TRAFFIC_EVERY:-1}"

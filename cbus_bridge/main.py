@@ -13,6 +13,7 @@ import paho.mqtt.client as mqtt
 from .ha_profiles import load_ha_mqtt_profiles
 from .cni_connection import CniConnection
 from .bridge import CbusMqttBridge
+from .utils import BridgeDiagnostics
 
 LOG = logging.getLogger("cbus_bridge")
 
@@ -32,13 +33,16 @@ class Metrics:
     mqtt_disconnects_total: int = 0
     cni_connects_total: int = 0
     cni_disconnects_total: int = 0
+    cni_connect_failures_total: int = 0
     resync_requests_total: int = 0
 
     last_mqtt_connect_ts: Optional[int] = None
+    last_mqtt_connect_mono: Optional[float] = None
     last_mqtt_disconnect_ts: Optional[int] = None
     last_mqtt_rx_ts: Optional[int] = None
 
     last_cni_connect_ts: Optional[int] = None
+    last_cni_connect_mono: Optional[float] = None
     last_cni_disconnect_ts: Optional[int] = None
 
     last_resync_ts: Optional[int] = None
@@ -92,6 +96,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--metrics-every", type=int, default=0,
                     help="Publish retained status metrics every N seconds (0 disables).")
 
+    ap.add_argument("--diagnostics-every", type=float, default=0,
+                    help="Status diagnostics interval, minimum 1s; 0 disables (service default 5s).")
+    ap.add_argument("--traffic-every", type=float, default=0,
+                    help="Non-retained traffic-view interval, minimum 1s; 0 disables (service default 1s).")
+    ap.add_argument("--traffic-topic", default="cbus/bridge/traffic")
     return ap
 
 
@@ -100,6 +109,18 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.readonly and args.enable_writes:
         parser.error("--readonly and --enable-writes cannot be combined")
+
+    for name in ("diagnostics_every", "traffic_every"):
+        value = getattr(args, name)
+        if value != 0 and (not 1 <= value <= 3600):
+            parser.error(f"--{name.replace('_', '-')} must be 0 or between 1 and 3600 seconds")
+
+    if (any(c in args.traffic_topic for c in ("#", "+", "\x00"))
+            or args.traffic_topic.startswith("cbus/write/")
+            or args.traffic_topic in (args.status_topic, args.status_topic + "/groups",
+                                      args.status_topic + "/diagnostics", args.availability_topic,
+                                      args.resync_topic)):
+        parser.error("--traffic-topic must be a distinct, non-command MQTT topic")
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -148,7 +169,9 @@ def main(argv=None) -> int:
         failover_after_attempts=args.failover_after_attempts,
     )
 
-    bridge = CbusMqttBridge(cni=cni, mqtt_client=mc, profiles=profiles, readonly=readonly)
+    diagnostics = BridgeDiagnostics(profiles)
+    bridge = CbusMqttBridge(cni=cni, mqtt_client=mc, profiles=profiles, readonly=readonly,
+                            diagnostics=diagnostics)
 
     def publish_availability(state: str, reason: str = "") -> None:
         mc.publish(args.availability_topic, payload=state, qos=1, retain=True)
@@ -182,6 +205,10 @@ def main(argv=None) -> int:
             "mqtt_disconnects_total": metrics.mqtt_disconnects_total,
             "cni_connects_total": metrics.cni_connects_total,
             "cni_disconnects_total": metrics.cni_disconnects_total,
+            "cni_connect_failures_total": metrics.cni_connect_failures_total,
+            "mqtt_connection_age_s": int(time.monotonic() - metrics.last_mqtt_connect_mono) if mqtt_up.is_set() and metrics.last_mqtt_connect_mono is not None else None,
+            "cni_connection_age_s": int(time.monotonic() - metrics.last_cni_connect_mono) if cni_up.is_set() and metrics.last_cni_connect_mono is not None else None,
+            "diagnostics": diagnostics.snapshot(),
 
             "last_mqtt_connect_ts": metrics.last_mqtt_connect_ts,
             "last_mqtt_disconnect_ts": metrics.last_mqtt_disconnect_ts,
@@ -205,6 +232,10 @@ def main(argv=None) -> int:
     def publish_status(reason: str = "") -> None:
         payload = json.dumps(build_status(reason), separators=(",", ":"), sort_keys=True)
         mc.publish(args.status_topic, payload=payload, qos=1, retain=True)
+        if args.diagnostics_every and mqtt_up.is_set():
+            info = mc.publish(args.status_topic + "/diagnostics", payload=payload, qos=0, retain=False)
+            if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                diagnostics.bump("diagnostic_publish_failures_total")
         LOG.debug("Published status (%s)", reason or "periodic")
 
     # ---- MQTT callbacks ----
@@ -214,6 +245,7 @@ def main(argv=None) -> int:
             mqtt_up.set()
             metrics.mqtt_connects_total += 1
             metrics.last_mqtt_connect_ts = now_epoch()
+            metrics.last_mqtt_connect_mono = time.monotonic()
 
             LOG.info("MQTT connected")
             client.subscribe("cbus/write/+/+/+/+")
@@ -256,6 +288,7 @@ def main(argv=None) -> int:
 
         try:
             if msg.retain:
+                diagnostics.bump("retained_commands_ignored_total")
                 LOG.warning("Ignoring retained MQTT command")
                 return
             if msg.topic == args.resync_topic:
@@ -320,30 +353,47 @@ def main(argv=None) -> int:
         threading.Thread(target=resync_loop, name="cbus-resync", daemon=True).start()
         LOG.info("Periodic resync enabled: every %ss (mode=%s)", args.resync_every, args.resync_mode)
 
-    # ---- Periodic metrics thread ----
+    # ---- Bounded diagnostics publishing; no new C-Bus queries ----
+    intervals = [v for v in (args.metrics_every, args.diagnostics_every) if v > 0]
+    status_interval = min(intervals) if intervals else 0
+
     def metrics_loop():
-        if args.metrics_every <= 0:
-            return
-        time.sleep(2)
-        while not stop_event.is_set():
+        next_status = next_traffic = next_groups = 0.0
+        while not stop_event.wait(0.25):
+            now = time.monotonic()
             try:
-                publish_status("periodic_metrics")
+                if status_interval and now >= next_status:
+                    next_status = now + status_interval
+                    if mqtt_up.is_set():
+                        publish_status("periodic_metrics")
+                if args.diagnostics_every and now >= next_groups:
+                    next_groups = now + 30
+                    if mqtt_up.is_set():
+                        info = mc.publish(args.status_topic + "/groups", json.dumps(diagnostics.group_snapshot()), qos=0, retain=False)
+                        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                            diagnostics.bump("diagnostic_publish_failures_total")
+                if args.traffic_every and now >= next_traffic:
+                    next_traffic = now + args.traffic_every
+                    diagnostics.publish_traffic(mc, args.traffic_topic, mqtt_up.is_set())
             except Exception as e:
+                diagnostics.bump("diagnostic_publish_failures_total")
                 set_last_error(f"Metrics publish failed: {e!r}")
                 LOG.warning("Metrics publish failed: %s", e)
-            stop_event.wait(args.metrics_every)
 
-    if args.metrics_every and args.metrics_every > 0:
+    if status_interval or args.traffic_every:
         threading.Thread(target=metrics_loop, name="cbus-metrics", daemon=True).start()
-        LOG.info("Metrics publishing enabled: every %ss (topic=%s)", args.metrics_every, args.status_topic)
+        LOG.info("Diagnostics intervals: status=%ss, traffic=%ss", status_interval, args.traffic_every)
 
     # ---- CNI reconnect loop ----
     while True:
         try:
             cni.connect()
+            diagnostics.reset_connection()
+            diagnostics.event("cni_connected", "LOCAL")
             cni_up.set()
             metrics.cni_connects_total += 1
             metrics.last_cni_connect_ts = now_epoch()
+            metrics.last_cni_connect_mono = time.monotonic()
 
             # Availability reason includes the active port (primary or secondary)
             publish_availability(AVAIL_ONLINE, f"CNI connected (port {cni.active_port})")
@@ -352,9 +402,15 @@ def main(argv=None) -> int:
             bridge.run_forever(init=args.init, status=args.status, status_include_96=args.status_include_96)
 
         except Exception as e:
+            was_connected = cni_up.is_set()
             cni_up.clear()
-            metrics.cni_disconnects_total += 1
-            metrics.last_cni_disconnect_ts = now_epoch()
+            if was_connected:
+                metrics.cni_disconnects_total += 1
+                metrics.last_cni_disconnect_ts = now_epoch()
+            else:
+                metrics.cni_connect_failures_total += 1
+            diagnostics.reset_connection()
+            diagnostics.event("cni_disconnected" if was_connected else "cni_connect_failure", "LOCAL")
 
             set_last_error(f"CNI loop error: {e!r}")
             publish_availability(AVAIL_OFFLINE, f"CNI loop error: {e}")

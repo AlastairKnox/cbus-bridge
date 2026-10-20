@@ -1,0 +1,353 @@
+# PROPOSED ONLY: requires approval and HA configuration validation before installation.
+mqtt:
+  sensor:
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: &id001
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: C-Bus RX token rate
+    unique_id: cbus_diag_rx_rate
+    default_entity_id: sensor.cbus_diag_rx_rate
+    value_template: '{{ value_json.diagnostics.rx_tokens_per_second_60s }}'
+    unit_of_measurement: tokens/s
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus TX frame rate
+    unique_id: cbus_diag_tx_rate
+    default_entity_id: sensor.cbus_diag_tx_rate
+    value_template: '{{ value_json.diagnostics.tx_frames_per_second_60s }}'
+    unit_of_measurement: frames/s
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus RX tokens
+    unique_id: cbus_diag_cni_rx_tokens_total
+    default_entity_id: sensor.cbus_diag_cni_rx_tokens_total
+    value_template: '{{ value_json.diagnostics.counters.get(''cni_rx_tokens_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus TX frames
+    unique_id: cbus_diag_cni_tx_frames_total
+    default_entity_id: sensor.cbus_diag_cni_tx_frames_total
+    value_template: '{{ value_json.diagnostics.counters.get(''cni_tx_frames_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Command attempts
+    unique_id: cbus_diag_command_attempts_total
+    default_entity_id: sensor.cbus_diag_command_attempts_total
+    value_template: '{{ value_json.diagnostics.counters.get(''command_attempts_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Command ACK successes
+    unique_id: cbus_diag_command_success_total
+    default_entity_id: sensor.cbus_diag_command_success_total
+    value_template: '{{ value_json.diagnostics.counters.get(''command_success_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Command timeouts
+    unique_id: cbus_diag_command_timeout_total
+    default_entity_id: sensor.cbus_diag_command_timeout_total
+    value_template: '{{ value_json.diagnostics.counters.get(''command_timeout_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Retries exhausted
+    unique_id: cbus_diag_command_retries_exhausted_total
+    default_entity_id: sensor.cbus_diag_command_retries_exhausted_total
+    value_template: '{{ value_json.diagnostics.counters.get(''command_retries_exhausted_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Command corruption ACKs
+    unique_id: cbus_diag_command_corruption_total
+    default_entity_id: sensor.cbus_diag_command_corruption_total
+    value_template: '{{ value_json.diagnostics.counters.get(''command_corruption_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Clock loss ACKs
+    unique_id: cbus_diag_command_clock_loss_total
+    default_entity_id: sensor.cbus_diag_command_clock_loss_total
+    value_template: '{{ value_json.diagnostics.counters.get(''command_clock_loss_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Command send failures
+    unique_id: cbus_diag_command_send_failures_total
+    default_entity_id: sensor.cbus_diag_command_send_failures_total
+    value_template: '{{ value_json.diagnostics.counters.get(''command_send_failures_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus RX checksum failures
+    unique_id: cbus_diag_rx_checksum_failure_total
+    default_entity_id: sensor.cbus_diag_rx_checksum_failure_total
+    value_template: '{{ value_json.diagnostics.counters.get(''rx_checksum_failure_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Malformed supported frames
+    unique_id: cbus_diag_rx_malformed_total
+    default_entity_id: sensor.cbus_diag_rx_malformed_total
+    value_template: '{{ value_json.diagnostics.counters.get(''rx_malformed_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Unsupported frames
+    unique_id: cbus_diag_rx_unsupported_total
+    default_entity_id: sensor.cbus_diag_rx_unsupported_total
+    value_template: '{{ value_json.diagnostics.counters.get(''rx_unsupported_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Invalid status encodings
+    unique_id: cbus_diag_status_invalid_encoding_groups_total
+    default_entity_id: sensor.cbus_diag_status_invalid_encoding_groups_total
+    value_template: '{{ value_json.diagnostics.counters.get(''status_invalid_encoding_groups_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Traffic view sampled events
+    unique_id: cbus_diag_traffic_events_sampled_out_total
+    default_entity_id: sensor.cbus_diag_traffic_events_sampled_out_total
+    value_template: '{{ value_json.diagnostics.counters.get(''traffic_events_sampled_out_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Traffic events not streamed
+    unique_id: cbus_diag_traffic_events_not_streamed_total
+    default_entity_id: sensor.cbus_diag_traffic_events_not_streamed_total
+    value_template: '{{ value_json.diagnostics.counters.get(''traffic_events_not_streamed_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Diagnostic publish failures
+    unique_id: cbus_diag_diagnostic_publish_failures_total
+    default_entity_id: sensor.cbus_diag_diagnostic_publish_failures_total
+    value_template: '{{ value_json.diagnostics.counters.get(''diagnostic_publish_failures_total'',
+      0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Observed errors
+    unique_id: cbus_diag_errors_total
+    default_entity_id: sensor.cbus_diag_errors_total
+    value_template: '{{ value_json.diagnostics.errors_observed_total }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Observed errors in 5 minutes
+    unique_id: cbus_diag_errors_5min
+    default_entity_id: sensor.cbus_diag_errors_5min
+    value_template: '{{ value_json.diagnostics.errors_observed_5min }}'
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Groups awaiting valid status
+    unique_id: cbus_diag_pending_groups
+    default_entity_id: sensor.cbus_diag_pending_groups
+    value_template: '{{ value_json.diagnostics.status_pending_groups }}'
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Groups waiting over 15 seconds
+    unique_id: cbus_diag_overdue_groups
+    default_entity_id: sensor.cbus_diag_overdue_groups
+    value_template: '{{ value_json.diagnostics.status_overdue_groups }}'
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Groups never observed
+    unique_id: cbus_diag_never_observed
+    default_entity_id: sensor.cbus_diag_never_observed
+    value_template: '{{ value_json.diagnostics.groups_never_observed }}'
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Last RX age
+    unique_id: cbus_diag_last_rx_age
+    default_entity_id: sensor.cbus_diag_last_rx_age
+    value_template: '{{ value_json.diagnostics.last_cni_rx_age_s }}'
+    unit_of_measurement: s
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Mean command ACK latency
+    unique_id: cbus_diag_ack_ms
+    default_entity_id: sensor.cbus_diag_ack_ms
+    value_template: '{{ value_json.diagnostics.mean_command_ack_ms }}'
+    unit_of_measurement: ms
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus CNI connection age
+    unique_id: cbus_diag_cni_age
+    default_entity_id: sensor.cbus_diag_cni_age
+    value_template: '{{ value_json.cni_connection_age_s }}'
+    unit_of_measurement: s
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus MQTT connection age
+    unique_id: cbus_diag_mqtt_age
+    default_entity_id: sensor.cbus_diag_mqtt_age
+    value_template: '{{ value_json.mqtt_connection_age_s }}'
+    unit_of_measurement: s
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus CNI reconnects
+    unique_id: cbus_diag_cni_reconnects
+    default_entity_id: sensor.cbus_diag_cni_reconnects
+    value_template: '{{ [value_json.cni_connects_total - 1, 0] | max }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus MQTT reconnects
+    unique_id: cbus_diag_mqtt_reconnects
+    default_entity_id: sensor.cbus_diag_mqtt_reconnects
+    value_template: '{{ [value_json.mqtt_connects_total - 1, 0] | max }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus CNI connection failures
+    unique_id: cbus_diag_cni_connect_failures
+    default_entity_id: sensor.cbus_diag_cni_connect_failures
+    value_template: '{{ value_json.cni_connect_failures_total }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/traffic
+    availability_topic: cbus/bridge/availability
+    expire_after: 5
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Live traffic
+    unique_id: cbus_diag_traffic
+    default_entity_id: sensor.cbus_diag_traffic
+    value_template: '{{ value_json.sequence }}'
+    json_attributes_topic: cbus/bridge/traffic
+  - state_topic: cbus/bridge/status/groups
+    availability_topic: cbus/bridge/availability
+    expire_after: 90
+    entity_category: diagnostic
+    device: *id001
+    name: C-Bus Group observations
+    unique_id: cbus_diag_groups
+    default_entity_id: sensor.cbus_diag_groups
+    value_template: '{{ value_json.ts }}'
+    json_attributes_topic: cbus/bridge/status/groups
+recorder:
+  exclude:
+    entities:
+    - sensor.cbus_diag_traffic
+    - sensor.cbus_diag_groups

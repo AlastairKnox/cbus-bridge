@@ -118,3 +118,34 @@ def parse_status_reply(hexline: str) -> Optional[StatusReply]:
         levels[b[3] + i] = decode_status_packed4(packed)
     return StatusReply(hdr=b[0], coding=b[1], app=b[2], start_group=b[3],
                        levels=levels, raw_hex=hexline)
+
+
+def diagnose_frame(hexline: str) -> str:
+    """Classify supported envelopes without labelling unrelated traffic corrupt."""
+    if not hexline or len(hexline) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", hexline):
+        return "nonhex"
+    b = bytes.fromhex(hexline)
+    supported = b[0] == 0x05 or (b[0] >= 0xE0 and len(b) > 1 and b[1] in (0x07, 0x47))
+    if not supported:
+        return "unsupported"
+    if sum(b) % 256:
+        return "checksum_failure"
+    if len(b) > 2 and b[2] != 0x38:
+        return "unsupported"
+    if b[0] >= 0xE0:
+        return "status" if parse_status_reply(hexline) else "malformed"
+    if len(b) < 7:
+        return "malformed"
+    if b[3] != 0 and b[3:5] != b"\x01\x00":
+        return "unsupported"
+    # Distinguish unsupported command opcodes from a truncated known command.
+    pos, end = (4 if b[3] == 0 else 5), len(b) - 1
+    while pos < end:
+        cmd = b[pos]
+        width = 3 if cmd in RAMP_COMMANDS else 2 if cmd in (1, 0x79, 9) else None
+        if width is None:
+            return "unsupported"
+        if pos + width > end:
+            return "malformed"
+        pos += width
+    return "lighting" if parse_monitored_sals(hexline) else "malformed"
