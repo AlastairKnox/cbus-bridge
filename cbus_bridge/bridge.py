@@ -335,8 +335,13 @@ class CbusMqttBridge:
         with self._write_lock:
             waiter = self._register_waiter(tag)
             payload = b.hex().upper() + f"{cks:02X}" + tag
-            self.cni.send_hex_frame(payload)
-            got, res = self._await_ack(tag, waiter)
+            try:
+                self.cni.send_hex_frame(payload)
+                got, res = self._await_ack(tag, waiter)
+            finally:
+                # A failed send must not leave a waiter attributed to a later command.
+                with self._ack_lock:
+                    self._ack_waiters.pop(tag, None)
 
         if not got:
             LOG.warning(

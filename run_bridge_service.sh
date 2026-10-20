@@ -7,9 +7,6 @@ source /opt/cbus_bridge/.venv/bin/activate
 exec python /opt/cbus_bridge/run_bridge.py \
   --cni-host "${CNI_HOST}" \
   --cni-port "${CNI_PRIMARY_PORT}" \
-  --cni-secondary-port "${CNI_SECONDARY_PORT}" \
-  --failover-after-seconds "${FAILOVER_AFTER_SECONDS}" \
-  --failover-after-attempts "${FAILOVER_AFTER_ATTEMPTS}" \
   --mqtt-host "${MQTT_HOST}" \
   --mqtt-port "${MQTT_PORT}" \
   --mqtt-user "${MQTT_USER}" \

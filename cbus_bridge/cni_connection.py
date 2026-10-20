@@ -21,7 +21,7 @@ class CniFailoverState:
 
 class CniConnection:
     """
-    CNI TCP connection wrapper with optional failover from a primary endpoint to a secondary endpoint.
+    CNI TCP connection wrapper for a single endpoint. Legacy failover settings are ignored.
 
     Key RX behavior:
     - Read in chunks into a buffer.
@@ -44,7 +44,10 @@ class CniConnection:
     ):
         self.host = host
         self.primary_port = primary_port
-        self.secondary_port = secondary_port
+        # Accept legacy callers/settings for a transition release, but disable failover.
+        if secondary_port:
+            LOG.warning("Secondary CNI port is obsolete and ignored; using port %d only", primary_port)
+        self.secondary_port = None
         self.timeout = timeout
 
         self.failover_after_seconds = max(int(failover_after_seconds), 0)
@@ -114,89 +117,22 @@ class CniConnection:
         s.settimeout(self.rx_timeout_s)
         return s
 
-    def _should_failover_now(self) -> bool:
-        if not self.secondary_port:
-            return False
-        if self._fo.failed_over:
-            return True
-        if self.failover_after_attempts > 0 and self._fo.primary_fail_count >= self.failover_after_attempts:
-            return True
-        if self.failover_after_seconds > 0 and self._fo.primary_fail_since_mono is not None:
-            if (time.monotonic() - self._fo.primary_fail_since_mono) >= self.failover_after_seconds:
-                return True
-        return False
-
     def connect(self) -> None:
-        # If failed over, on reconnect try primary once, then secondary.
-        if self._fo.failed_over and self.secondary_port:
-            try:
-                s = self._connect_to(self.host, self.primary_port)
-                with self.lock:
-                    self._drop_socket_locked()
-                    self.sock = s
-                    self._active_port = self.primary_port
-
-                self._fo.failed_over = False
-                self._fo.failed_over_at_epoch = None
-                self._fo.primary_fail_count = 0
-                self._fo.primary_fail_since_mono = None
-
-                LOG.warning("CNI primary recovered on reconnect; now using primary %s:%d", self.host, self.primary_port)
-                return
-            except Exception as primary_exc:
-                LOG.info("Primary still unavailable on reconnect (%r); using secondary", primary_exc)
-
-            s2 = self._connect_to(self.host, self.secondary_port)
-            with self.lock:
-                self._drop_socket_locked()
-                self.sock = s2
-                self._active_port = self.secondary_port
-            LOG.info("Connected to CNI (secondary) %s:%d", self.host, self.secondary_port)
-            return
-
-        # Normal mode: try primary
+        """Reconnect to the single configured CNI endpoint; never try a second port."""
         try:
-            s = self._connect_to(self.host, self.primary_port)
-            with self.lock:
-                self._drop_socket_locked()
-                self.sock = s
-                self._active_port = self.primary_port
-
-            self._fo.primary_fail_count = 0
-            self._fo.primary_fail_since_mono = None
-
-            LOG.info("Connected to CNI (primary) %s:%d", self.host, self.primary_port)
-            return
-
-        except Exception as primary_exc:
+            sock = self._connect_to(self.host, self.primary_port)
+        except Exception:
             self._fo.primary_fail_count += 1
             if self._fo.primary_fail_since_mono is None:
                 self._fo.primary_fail_since_mono = time.monotonic()
-
-            if self._should_failover_now() and self.secondary_port:
-                try:
-                    s2 = self._connect_to(self.host, self.secondary_port)
-                    with self.lock:
-                        self._drop_socket_locked()
-                        self.sock = s2
-                        self._active_port = self.secondary_port
-
-                    self._fo.failed_over = True
-                    self._fo.failed_over_at_epoch = int(time.time())
-
-                    LOG.warning(
-                        "CNI failover activated: primary %s:%d unavailable; now using secondary %s:%d",
-                        self.host, self.primary_port, self.host, self.secondary_port
-                    )
-                    return
-                except Exception as secondary_exc:
-                    LOG.warning(
-                        "CNI failover attempt failed: secondary %s:%d also unavailable (%r)",
-                        self.host, self.secondary_port, secondary_exc
-                    )
-                    raise primary_exc
-
-            raise primary_exc
+            raise
+        with self.lock:
+            self._drop_socket_locked()
+            self.sock = sock
+            self._active_port = self.primary_port
+        self._fo.primary_fail_count = 0
+        self._fo.primary_fail_since_mono = None
+        LOG.info("Connected to CNI %s:%d", self.host, self.primary_port)
 
     # ----------------------------
     # Send/recv primitives

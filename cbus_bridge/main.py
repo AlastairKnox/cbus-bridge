@@ -52,15 +52,15 @@ class Metrics:
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cni-host", required=True)
-    ap.add_argument("--cni-port", type=int, default=10001, help="Primary CNI port (preferred).")
+    ap.add_argument("--cni-port", type=int, default=10001, help="Single CNI port (default: 10001).")
 
     # Failover settings (Mini-project #2)
     ap.add_argument("--cni-secondary-port", type=int, default=0,
-                    help="Secondary CNI port for failover (0 disables).")
+                    help="Deprecated; ignored. The CNI has a single endpoint.")
     ap.add_argument("--failover-after-seconds", type=int, default=60,
-                    help="Fail over to secondary after primary has failed for this many seconds.")
+                    help="Deprecated; ignored.")
     ap.add_argument("--failover-after-attempts", type=int, default=10,
-                    help="Fail over to secondary after this many consecutive primary failures.")
+                    help="Deprecated; ignored.")
 
     ap.add_argument("--mqtt-host", default="127.0.0.1")
     ap.add_argument("--mqtt-port", type=int, default=1883)
@@ -218,8 +218,10 @@ def main(argv=None) -> int:
             client.subscribe(args.resync_topic)
             LOG.info("Subscribed to %s", args.resync_topic)
 
-            if not cni_up.is_set():
-                publish_availability(AVAIL_OFFLINE, "MQTT up, awaiting CNI")
+            publish_availability(
+                AVAIL_ONLINE if cni_up.is_set() else AVAIL_OFFLINE,
+                "MQTT connected; CNI connected" if cni_up.is_set() else "MQTT up, awaiting CNI",
+            )
 
             publish_status("mqtt_connected")
         else:
