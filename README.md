@@ -17,3 +17,5 @@ Create a local virtual environment and install `requirements.txt` when preparing
 Commit and push changes from the desktop. Fetch/pull into the separate cgate checkout, review the change, and deploy deliberately. A Git pull alone does not replace `/opt/cbus_bridge`, install dependencies, change settings, or restart the service. Preserve the live environment and site mappings when deploying.
 
 The original runtime source and settings remain on cgate. Virtual environments, generated files, and legacy scratch versions are not tracked.
+
+For repeatable checks, installation and rollback, see [DEPLOYMENT.md](DEPLOYMENT.md).
