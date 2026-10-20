@@ -1,0 +1,15 @@
+# Machine-specific settings and credentials
+/config.json
+/ha_mqtt.yaml
+*.env
+.env*
+!.env.example
+# Generated environments and files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.log
+# Preserved working copies from the live server
+/cbus_bridge/bridge.py.030626
+/cbus_bridge/bridge.py.new
