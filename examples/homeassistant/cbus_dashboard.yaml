@@ -55,7 +55,7 @@ views:
 
           | Time | Direction | Event | Details |
           | :--- | :---: | :--- | :--- |
-          {% for e in (state_attr('sensor.cbus_diag_traffic', 'events') or []) | reverse %}
+          {% for e in (state_attr('sensor.cbus_diag_traffic', 'events') or []) | reverse -%}
           | {{ e.ts | timestamp_custom('%H:%M:%S', true) }} | {{ '← RX' if e.direction == 'RX' else 'TX →' if e.direction == 'TX' else 'LOCAL' }} | {{ e.kind }} | {% if e.group is defined %}group {{ e.group }} {% endif %}{% if e.unit is defined %}unit {{ e.unit }} {% endif %}{% if e.command is defined %}cmd {{ '%02X' | format(e.command) }} {% endif %}{% if e.level is defined and e.level is not none %}level {{ e.level }} {% endif %}{% if e.code is defined %}{{ e.code }} {% endif %}{% if e.result is defined %}{{ e.result }} {% endif %}{% if e.start_group is defined %}block {{ e.start_group }} {% endif %}{% if e.hex is defined %}`{{ e.hex }}`{% endif %} |
           {% endfor %}
           {% endif %}
@@ -77,7 +77,7 @@ views:
 
           | Group | Raw level (0–255) | Confidence | Observation age | Status |
           | :--- | :--- | :--- | :--- | :--- |
-          {% for g in state_attr('sensor.cbus_diag_groups', 'groups') or [] %}
+          {% for g in state_attr('sensor.cbus_diag_groups', 'groups') or [] -%}
           | {{ g.group }} | {{ g.published_level if g.published_level is not none else 'unknown' }} | {{ g.confidence }} | {{ (g.observation_age_s | string) + ' s' if g.observation_age_s is not none else 'never' }} | {{ g.status_quality }} |
           {% endfor %}
           {% endif %}
