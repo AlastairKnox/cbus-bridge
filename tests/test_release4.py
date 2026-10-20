@@ -246,7 +246,12 @@ class ProposalTests(unittest.TestCase):
         for card in dashboard['views'][0]['cards']:
             self.assertFalse(card['type'].startswith('custom:'))
             for entity in card.get('entities', card.get('entity_id', [])):
-                self.assertIn(entity, ids)
+                if isinstance(entity, dict):
+                    self.assertTrue(entity.get('name'))
+                    self.assertNotIn('C-Bus', entity['name'])
+                    self.assertIn(entity['entity'], ids)
+                else:
+                    self.assertIn(entity, ids)
 
     def test_cli_prevents_feedback_and_unbounded_publish_intervals(self):
         for flags in [['--traffic-every','0.01'], ['--diagnostics-every','nan'],

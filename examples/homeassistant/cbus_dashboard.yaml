@@ -1,4 +1,4 @@
-# PROPOSED ONLY. Built-in cards, no HACS/custom frontend dependencies.
+# Built-in cards; no custom frontend dependencies.
 title: C-Bus Observatory
 views:
   - title: C-Bus Traffic
@@ -13,36 +13,74 @@ views:
       - type: entities
         title: Connection and traffic
         entities:
-          - sensor.cbus_diag_cni_age
-          - sensor.cbus_diag_mqtt_age
-          - sensor.cbus_diag_last_rx_age
-          - sensor.cbus_diag_rx_rate
-          - sensor.cbus_diag_tx_rate
-          - sensor.cbus_diag_ack_ms
-          - sensor.cbus_diag_cni_reconnects
-          - sensor.cbus_diag_mqtt_reconnects
+          - entity: sensor.cbus_diag_cni_age
+            name: "CNI connection age"
+          - entity: sensor.cbus_diag_mqtt_age
+            name: "MQTT connection age"
+          - entity: sensor.cbus_diag_last_rx_age
+            name: "Last RX age"
+          - entity: sensor.cbus_diag_rx_rate
+            name: "RX token rate"
+          - entity: sensor.cbus_diag_tx_rate
+            name: "TX frame rate"
+          - entity: sensor.cbus_diag_ack_ms
+            name: "Mean command ACK latency"
+          - entity: sensor.cbus_diag_cni_reconnects
+            name: "CNI reconnects"
+          - entity: sensor.cbus_diag_mqtt_reconnects
+            name: "MQTT reconnects"
       - type: history-graph
         title: Traffic over time
         hours_to_show: 2
         entities:
-          - sensor.cbus_diag_rx_rate
-          - sensor.cbus_diag_tx_rate
+          - entity: sensor.cbus_diag_rx_rate
+            name: "RX token rate"
+          - entity: sensor.cbus_diag_tx_rate
+            name: "TX frame rate"
       - type: entities
         title: Observed quality and synchronization
         entities:
-          - sensor.cbus_diag_errors_5min
-          - sensor.cbus_diag_errors_total
-          - sensor.cbus_diag_rx_checksum_failure_total
-          - sensor.cbus_diag_rx_malformed_total
-          - sensor.cbus_diag_rx_unsupported_total
-          - sensor.cbus_diag_status_invalid_encoding_groups_total
-          - sensor.cbus_diag_command_timeout_total
-          - sensor.cbus_diag_command_retries_exhausted_total
-          - sensor.cbus_diag_command_corruption_total
-          - sensor.cbus_diag_command_clock_loss_total
-          - sensor.cbus_diag_pending_groups
-          - sensor.cbus_diag_overdue_groups
-          - sensor.cbus_diag_never_observed
+          - entity: sensor.cbus_diag_errors_5min
+            name: "Observed errors in 5 minutes"
+          - entity: sensor.cbus_diag_errors_total
+            name: "Observed errors"
+          - entity: sensor.cbus_diag_rx_checksum_failure_total
+            name: "RX checksum failures"
+          - entity: sensor.cbus_diag_rx_malformed_total
+            name: "Malformed supported frames"
+          - entity: sensor.cbus_diag_rx_unsupported_total
+            name: "Unsupported frames"
+          - entity: sensor.cbus_diag_status_invalid_encoding_groups_total
+            name: "Invalid status encodings"
+          - entity: sensor.cbus_diag_command_timeout_total
+            name: "Command timeouts"
+          - entity: sensor.cbus_diag_command_retries_exhausted_total
+            name: "Retries exhausted"
+          - entity: sensor.cbus_diag_command_corruption_total
+            name: "Command corruption ACKs"
+          - entity: sensor.cbus_diag_command_clock_loss_total
+            name: "Clock loss ACKs"
+          - entity: sensor.cbus_diag_pending_groups
+            name: "Awaiting status reply"
+          - entity: sensor.cbus_diag_overdue_groups
+            name: "No reply after 15 seconds"
+          - entity: sensor.cbus_diag_absent_groups
+            name: "Reported absent"
+          - entity: sensor.cbus_diag_invalid_groups
+            name: "Invalid status (current groups)"
+          - entity: sensor.cbus_diag_never_observed
+            name: "Groups never observed"
+      - type: entities
+        title: Command queue
+        entities:
+          - entity: sensor.cbus_diag_queue_depth
+            name: "Waiting commands"
+          - entity: sensor.cbus_diag_queue_full
+            name: "Rejected: queue full"
+          - entity: sensor.cbus_diag_queue_expired
+            name: "Discarded: expired"
+          - entity: sensor.cbus_diag_queue_discarded
+            name: "Discarded: disconnected"
       - type: markdown
         title: Live wire · latest 20 events
         entity_id:
@@ -62,9 +100,12 @@ views:
       - type: entities
         title: Stream sampling (not C-Bus errors)
         entities:
-          - sensor.cbus_diag_traffic_events_sampled_out_total
-          - sensor.cbus_diag_traffic_events_not_streamed_total
-          - sensor.cbus_diag_diagnostic_publish_failures_total
+          - entity: sensor.cbus_diag_traffic_events_sampled_out_total
+            name: "Traffic view sampled events"
+          - entity: sensor.cbus_diag_traffic_events_not_streamed_total
+            name: "Traffic events not streamed"
+          - entity: sensor.cbus_diag_diagnostic_publish_failures_total
+            name: "Diagnostic publish failures"
       - type: markdown
         title: Group observation quality
         entity_id:

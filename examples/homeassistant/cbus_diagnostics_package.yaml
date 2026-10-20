@@ -1,4 +1,4 @@
-# PROPOSED ONLY: requires approval and HA configuration validation before installation.
+# MQTT diagnostics package. Validate HA configuration before applying changes.
 mqtt:
   sensor:
   - state_topic: cbus/bridge/status/diagnostics
@@ -9,7 +9,7 @@ mqtt:
       identifiers:
       - cbus_bridge_diagnostics
       name: C-Bus Bridge Diagnostics
-    name: C-Bus RX token rate
+    name: RX token rate
     unique_id: cbus_diag_rx_rate
     default_entity_id: sensor.cbus_diag_rx_rate
     value_template: '{{ value_json.diagnostics.rx_tokens_per_second_60s }}'
@@ -20,7 +20,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus TX frame rate
+    name: TX frame rate
     unique_id: cbus_diag_tx_rate
     default_entity_id: sensor.cbus_diag_tx_rate
     value_template: '{{ value_json.diagnostics.tx_frames_per_second_60s }}'
@@ -31,7 +31,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus RX tokens
+    name: RX tokens
     unique_id: cbus_diag_cni_rx_tokens_total
     default_entity_id: sensor.cbus_diag_cni_rx_tokens_total
     value_template: '{{ value_json.diagnostics.counters.get(''cni_rx_tokens_total'',
@@ -42,7 +42,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus TX frames
+    name: TX frames
     unique_id: cbus_diag_cni_tx_frames_total
     default_entity_id: sensor.cbus_diag_cni_tx_frames_total
     value_template: '{{ value_json.diagnostics.counters.get(''cni_tx_frames_total'',
@@ -53,7 +53,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Command attempts
+    name: Command attempts
     unique_id: cbus_diag_command_attempts_total
     default_entity_id: sensor.cbus_diag_command_attempts_total
     value_template: '{{ value_json.diagnostics.counters.get(''command_attempts_total'',
@@ -64,7 +64,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Command ACK successes
+    name: Command ACK successes
     unique_id: cbus_diag_command_success_total
     default_entity_id: sensor.cbus_diag_command_success_total
     value_template: '{{ value_json.diagnostics.counters.get(''command_success_total'',
@@ -75,7 +75,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Command timeouts
+    name: Command timeouts
     unique_id: cbus_diag_command_timeout_total
     default_entity_id: sensor.cbus_diag_command_timeout_total
     value_template: '{{ value_json.diagnostics.counters.get(''command_timeout_total'',
@@ -86,7 +86,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Retries exhausted
+    name: Retries exhausted
     unique_id: cbus_diag_command_retries_exhausted_total
     default_entity_id: sensor.cbus_diag_command_retries_exhausted_total
     value_template: '{{ value_json.diagnostics.counters.get(''command_retries_exhausted_total'',
@@ -97,7 +97,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Command corruption ACKs
+    name: Command corruption ACKs
     unique_id: cbus_diag_command_corruption_total
     default_entity_id: sensor.cbus_diag_command_corruption_total
     value_template: '{{ value_json.diagnostics.counters.get(''command_corruption_total'',
@@ -108,7 +108,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Clock loss ACKs
+    name: Clock loss ACKs
     unique_id: cbus_diag_command_clock_loss_total
     default_entity_id: sensor.cbus_diag_command_clock_loss_total
     value_template: '{{ value_json.diagnostics.counters.get(''command_clock_loss_total'',
@@ -119,7 +119,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Command send failures
+    name: Command send failures
     unique_id: cbus_diag_command_send_failures_total
     default_entity_id: sensor.cbus_diag_command_send_failures_total
     value_template: '{{ value_json.diagnostics.counters.get(''command_send_failures_total'',
@@ -130,7 +130,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus RX checksum failures
+    name: RX checksum failures
     unique_id: cbus_diag_rx_checksum_failure_total
     default_entity_id: sensor.cbus_diag_rx_checksum_failure_total
     value_template: '{{ value_json.diagnostics.counters.get(''rx_checksum_failure_total'',
@@ -141,7 +141,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Malformed supported frames
+    name: Malformed supported frames
     unique_id: cbus_diag_rx_malformed_total
     default_entity_id: sensor.cbus_diag_rx_malformed_total
     value_template: '{{ value_json.diagnostics.counters.get(''rx_malformed_total'',
@@ -152,7 +152,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Unsupported frames
+    name: Unsupported frames
     unique_id: cbus_diag_rx_unsupported_total
     default_entity_id: sensor.cbus_diag_rx_unsupported_total
     value_template: '{{ value_json.diagnostics.counters.get(''rx_unsupported_total'',
@@ -163,7 +163,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Invalid status encodings
+    name: Invalid status encodings
     unique_id: cbus_diag_status_invalid_encoding_groups_total
     default_entity_id: sensor.cbus_diag_status_invalid_encoding_groups_total
     value_template: '{{ value_json.diagnostics.counters.get(''status_invalid_encoding_groups_total'',
@@ -174,7 +174,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Traffic view sampled events
+    name: Traffic view sampled events
     unique_id: cbus_diag_traffic_events_sampled_out_total
     default_entity_id: sensor.cbus_diag_traffic_events_sampled_out_total
     value_template: '{{ value_json.diagnostics.counters.get(''traffic_events_sampled_out_total'',
@@ -185,7 +185,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Traffic events not streamed
+    name: Traffic events not streamed
     unique_id: cbus_diag_traffic_events_not_streamed_total
     default_entity_id: sensor.cbus_diag_traffic_events_not_streamed_total
     value_template: '{{ value_json.diagnostics.counters.get(''traffic_events_not_streamed_total'',
@@ -196,7 +196,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Diagnostic publish failures
+    name: Diagnostic publish failures
     unique_id: cbus_diag_diagnostic_publish_failures_total
     default_entity_id: sensor.cbus_diag_diagnostic_publish_failures_total
     value_template: '{{ value_json.diagnostics.counters.get(''diagnostic_publish_failures_total'',
@@ -207,7 +207,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Observed errors
+    name: Observed errors
     unique_id: cbus_diag_errors_total
     default_entity_id: sensor.cbus_diag_errors_total
     value_template: '{{ value_json.diagnostics.errors_observed_total }}'
@@ -217,7 +217,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Observed errors in 5 minutes
+    name: Observed errors in 5 minutes
     unique_id: cbus_diag_errors_5min
     default_entity_id: sensor.cbus_diag_errors_5min
     value_template: '{{ value_json.diagnostics.errors_observed_5min }}'
@@ -227,7 +227,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Groups awaiting status reply
+    name: Groups awaiting status reply
     unique_id: cbus_diag_pending_groups
     default_entity_id: sensor.cbus_diag_pending_groups
     value_template: '{{ value_json.diagnostics.status_pending_groups }}'
@@ -237,7 +237,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Groups waiting over 15 seconds
+    name: Groups waiting over 15 seconds
     unique_id: cbus_diag_overdue_groups
     default_entity_id: sensor.cbus_diag_overdue_groups
     value_template: '{{ value_json.diagnostics.status_overdue_groups }}'
@@ -247,7 +247,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Groups never observed
+    name: Groups never observed
     unique_id: cbus_diag_never_observed
     default_entity_id: sensor.cbus_diag_never_observed
     value_template: '{{ value_json.diagnostics.groups_never_observed }}'
@@ -257,7 +257,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Last RX age
+    name: Last RX age
     unique_id: cbus_diag_last_rx_age
     default_entity_id: sensor.cbus_diag_last_rx_age
     value_template: '{{ value_json.diagnostics.last_cni_rx_age_s }}'
@@ -268,7 +268,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Mean command ACK latency
+    name: Mean command ACK latency
     unique_id: cbus_diag_ack_ms
     default_entity_id: sensor.cbus_diag_ack_ms
     value_template: '{{ value_json.diagnostics.mean_command_ack_ms }}'
@@ -279,7 +279,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus CNI connection age
+    name: CNI connection age
     unique_id: cbus_diag_cni_age
     default_entity_id: sensor.cbus_diag_cni_age
     value_template: '{{ value_json.cni_connection_age_s }}'
@@ -290,7 +290,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus MQTT connection age
+    name: MQTT connection age
     unique_id: cbus_diag_mqtt_age
     default_entity_id: sensor.cbus_diag_mqtt_age
     value_template: '{{ value_json.mqtt_connection_age_s }}'
@@ -301,7 +301,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus CNI reconnects
+    name: CNI reconnects
     unique_id: cbus_diag_cni_reconnects
     default_entity_id: sensor.cbus_diag_cni_reconnects
     value_template: '{{ [value_json.cni_connects_total - 1, 0] | max }}'
@@ -311,7 +311,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus MQTT reconnects
+    name: MQTT reconnects
     unique_id: cbus_diag_mqtt_reconnects
     default_entity_id: sensor.cbus_diag_mqtt_reconnects
     value_template: '{{ [value_json.mqtt_connects_total - 1, 0] | max }}'
@@ -321,7 +321,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus CNI connection failures
+    name: CNI connection failures
     unique_id: cbus_diag_cni_connect_failures
     default_entity_id: sensor.cbus_diag_cni_connect_failures
     value_template: '{{ value_json.cni_connect_failures_total }}'
@@ -331,7 +331,7 @@ mqtt:
     expire_after: 5
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Live traffic
+    name: Live traffic
     unique_id: cbus_diag_traffic
     default_entity_id: sensor.cbus_diag_traffic
     value_template: '{{ value_json.sequence }}'
@@ -341,7 +341,7 @@ mqtt:
     expire_after: 90
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Group observations
+    name: Group observations
     unique_id: cbus_diag_groups
     default_entity_id: sensor.cbus_diag_groups
     value_template: '{{ value_json.ts }}'
@@ -351,7 +351,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Groups reported absent
+    name: Groups reported absent
     unique_id: cbus_diag_absent_groups
     default_entity_id: sensor.cbus_diag_absent_groups
     value_template: "{{ value_json.diagnostics.status_absent_configured_groups }}"
@@ -361,7 +361,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Groups with invalid status
+    name: Groups with invalid status
     unique_id: cbus_diag_invalid_groups
     default_entity_id: sensor.cbus_diag_invalid_groups
     value_template: "{{ value_json.diagnostics.status_invalid_configured_groups }}"
@@ -371,7 +371,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Queued commands
+    name: Queued commands
     unique_id: cbus_diag_queue_depth
     default_entity_id: sensor.cbus_diag_queue_depth
     value_template: "{{ value_json.command_queue.depth }}"
@@ -381,7 +381,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Queue full rejections
+    name: Queue full rejections
     unique_id: cbus_diag_queue_full
     default_entity_id: sensor.cbus_diag_queue_full
     value_template: "{{ value_json.diagnostics.counters.get('queue_full_rejected_total', 0) }}"
@@ -391,7 +391,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Expired queued commands
+    name: Expired queued commands
     unique_id: cbus_diag_queue_expired
     default_entity_id: sensor.cbus_diag_queue_expired
     value_template: "{{ value_json.diagnostics.counters.get('queue_expired_discarded_total', 0) }}"
@@ -401,7 +401,7 @@ mqtt:
     expire_after: 30
     entity_category: diagnostic
     device: *id001
-    name: C-Bus Queued commands discarded on disconnect
+    name: Queued commands discarded on disconnect
     unique_id: cbus_diag_queue_discarded
     default_entity_id: sensor.cbus_diag_queue_discarded
     value_template: "{{ value_json.diagnostics.counters.get('queue_disconnect_discarded_total', 0) }}"
