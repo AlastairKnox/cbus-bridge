@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple, Set, List
 import paho.mqtt.client as mqtt
 
 from .cni_connection import CniConnection
-from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame, RAMP_CODES
+from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame, RAMP_CODES, parse_binary_status_reply
 from .ha_profiles import GroupProfile
 from .utils import (
     BridgeDiagnostics,
@@ -99,6 +99,8 @@ class CbusMqttBridge:
         self._write_lock = threading.Lock()
         self._command_local = threading.local()
         self._read_generation = 0
+        self._state_publish_lock = threading.RLock()
+        self._last_published_state = {}
 
     def execute_queued(self, operation, lease):
         self._command_local.lease = lease
@@ -112,6 +114,8 @@ class CbusMqttBridge:
         return lease.atomic(operation, expire=expire) if lease is not None else operation()
 
     def cancel_session(self):
+        with self._state_publish_lock:
+            self._last_published_state.clear()
         with self._pending_synthetic_lock:
             self._read_generation += 1
             timers = list(self._pending_synthetic_timers.values())
@@ -228,9 +232,36 @@ class CbusMqttBridge:
     # ----------------------------
     # Publishing helpers
     # ----------------------------
-    def publish_state(self, p: GroupProfile, is_on: bool) -> None:
+    def publish_state(self, p: GroupProfile, is_on: bool, *, only_if_changed=False):
         payload = "ON" if is_on else "OFF"
-        self.mqtt.publish(self._topic_for(p, "state"), payload=payload, retain=True, qos=1)
+        topic = self._topic_for(p, "state")
+        with self._state_publish_lock:
+            if only_if_changed and self._last_published_state.get(topic) == payload:
+                return 'unchanged'
+            result = self.mqtt.publish(topic, payload=payload, retain=True, qos=1)
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                self._last_published_state[topic] = payload
+                return 'published'
+            self._last_published_state.pop(topic, None)
+            return 'failed'
+
+    def handle_binary_status(self, reply):
+        self.diagnostics.binary_status(reply)
+        for group, value in reply.states.items():
+            if value not in ('on', 'off'):
+                continue  # absence/error must not fabricate an OFF or numeric level
+            self._cancel_pending_synthetic_level(reply.app, group)
+            for profile in self._profiles_by_app_group.get((reply.app, group), []):
+                if profile.level_state_topic == profile.state_topic:
+                    # Some existing templates derive state and brightness from a
+                    # single numeric topic. An ON/OFF string would corrupt both.
+                    self.diagnostics.bump('binary_shared_topic_skips_total')
+                    continue
+                result = self.publish_state(profile, value == 'on', only_if_changed=True)
+                if result == 'published':
+                    self.diagnostics.binary_published(profile)
+                elif result == 'failed':
+                    self.diagnostics.bump('binary_state_publish_failures_total')
 
     def publish_level(self, p: GroupProfile, level255: int, *, source: str = "ACK") -> None:
         if source == 'ACK':
@@ -594,7 +625,7 @@ class CbusMqttBridge:
     # ----------------------------
     # Init + status + resync (manual use)
     # ----------------------------
-    def send_init(self, app: int) -> None:
+    def send_init(self, app: int, monitor: bool = False) -> None:
         """
         PCI init sequence used in your setup.
         """
@@ -613,7 +644,7 @@ class CbusMqttBridge:
         self.cni.send_line("A3420002g")
         self.diagnostics.tx("initialization")
         time.sleep(0.05)
-        self.cni.send_line("A3300059g")
+        self.cni.send_line("A3300079g" if monitor else "A3300059g")
         self.diagnostics.tx("initialization")
         time.sleep(0.05)
 
@@ -680,13 +711,13 @@ class CbusMqttBridge:
     # ----------------------------
     # Read loop: process ACK tokens + normal C-Bus traffic
     # ----------------------------
-    def run_forever(self, init: bool, status: bool, status_include_96: bool = False, on_ready=None) -> None:
+    def run_forever(self, init: bool, status: bool, status_include_96: bool = False, on_ready=None, monitor: bool = False) -> None:
         apps = {k[1] for k in self.profiles.keys()}
         app = 56 if 56 in apps else (next(iter(apps)) if apps else 56)
 
         if init:
             LOG.info("Sending init sequence")
-            self.send_init(app=app)
+            self.send_init(app=app, monitor=monitor)
 
         if status:
             groups = {k[2] for k in self.profiles.keys() if k[1] == app}
@@ -746,6 +777,10 @@ class CbusMqttBridge:
             self.diagnostics.event(category + "_frame", "RX", hex=norm[:160], truncated=len(norm) > 160)
             if norm != text_line.upper():
                 self.diagnostics.bump("normalized_tokens_total")
+            binary_reply = parse_binary_status_reply(norm)
+            if binary_reply and binary_reply.app == 0x38:
+                self.handle_binary_status(binary_reply)
+                continue
             sr = parse_status_reply(norm)
             if sr and sr.app == 0x38:
                 self.diagnostics.status(sr)

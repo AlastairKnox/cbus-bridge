@@ -119,11 +119,15 @@ class BridgeDiagnostics:
         self.last_tx = None
         self.last_rx_mono = None
         self.last_tx_mono = None
+        self.last_binary_report_ts = None
+        self.last_binary_report_mono = None
         self.groups = {f'{p.net}/{p.app}/{p.group}': {
             'net': p.net, 'app': p.app, 'group': p.group,
             'last_bus_ts': None, 'last_bus_mono': None, 'last_publish_ts': None,
             'published_level': None, 'source': 'unknown', 'confidence': 'unknown',
             'pending_since': None, 'status_quality': 'not_requested',
+            'binary_status': 'not_observed', 'last_binary_status_ts': None,
+            'last_binary_status_mono': None, 'last_binary_publish_ts': None,
             'profile_kind': 'writable' if p.command_topic else 'read_only',
         } for p in profiles.values()}
 
@@ -222,6 +226,33 @@ class BridgeDiagnostics:
                             state['last_bus_ts'] = int(self.wall())
                             state['last_bus_mono'] = self.clock()
 
+    def binary_status(self, reply):
+        # Binary evidence cannot complete a pending LEVEL request or refresh the
+        # age/confidence of a historical numeric brightness reading.
+        with self.lock:
+            self.counters['binary_status_reports_total'] += 1
+            self.last_binary_report_ts = int(self.wall())
+            self.last_binary_report_mono = self.clock()
+            for group, value in reply.states.items():
+                self.counters['binary_status_' + value + '_groups_total'] += 1
+                key = f'254/{reply.app}/{group}'
+                if key in self.groups:
+                    self.groups[key].update(binary_status=value,
+                        last_binary_status_ts=int(self.wall()), last_binary_status_mono=self.clock())
+            self.event('binary_status_report', 'RX', app=reply.app,
+                       start_group=reply.start_group, groups=len(reply.states),
+                       on=sum(s == 'on' for s in reply.states.values()),
+                       off=sum(s == 'off' for s in reply.states.values()),
+                       absent=sum(s == 'absent' for s in reply.states.values()),
+                       error=sum(s == 'error' for s in reply.states.values()))
+
+    def binary_published(self, profile):
+        with self.lock:
+            state = self.groups.get(f'{profile.net}/{profile.app}/{profile.group}')
+            if state is not None:
+                state['last_binary_publish_ts'] = int(self.wall())
+            self.counters['binary_state_publishes_total'] += 1
+
     def reset_connection(self):
         # Pending synchronization belongs to the old TCP session. Historical group
         # readings stay visible with timestamps; their age is not a fault assertion.
@@ -247,6 +278,10 @@ class BridgeDiagnostics:
                     'last_cni_tx_age_s': None if self.last_tx_mono is None else round(now - self.last_tx_mono, 1),
                     'rx_tokens_per_second_60s': round(sum(n for sec, n in self.buckets if sec > int(now) - 60) / elapsed, 3),
                     'tx_frames_per_second_60s': round(sum(n for sec, n in self.tx_buckets if sec > int(now) - 60) / elapsed, 3),
+                    'last_binary_report_ts': self.last_binary_report_ts,
+                    'last_binary_report_age_s': None if self.last_binary_report_mono is None else round(now - self.last_binary_report_mono, 1),
+                    'binary_error_configured_groups': sum(s['binary_status'] == 'error' for s in self.groups.values()),
+                    'binary_absent_configured_groups': sum(s['binary_status'] == 'absent' for s in self.groups.values()),
                     'configured_groups': len(self.groups), 'status_pending_groups': len(pending),
                     'status_overdue_groups': sum(now - s['pending_since'] >= 15 for s in pending),
                     'status_absent_configured_groups': sum(s['status_quality'] == 'absent' for s in self.groups.values()),
@@ -260,7 +295,8 @@ class BridgeDiagnostics:
             now = self.clock()
             groups = []
             for state in self.groups.values():
-                row = {k: v for k, v in state.items() if k not in ('last_bus_mono', 'pending_since')}
+                row = {k: v for k, v in state.items() if k not in ('last_bus_mono', 'pending_since', 'last_binary_status_mono')}
+                row['binary_observation_age_s'] = None if state['last_binary_status_mono'] is None else round(now - state['last_binary_status_mono'], 1)
                 row['observation_age_s'] = None if state['last_bus_mono'] is None else round(now - state['last_bus_mono'], 1)
                 if 'last_transition' in row:
                     row['last_transition'] = dict(row['last_transition'])

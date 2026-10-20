@@ -22,3 +22,6 @@ For repeatable checks, installation and rollback, see [DEPLOYMENT.md](DEPLOYMENT
 
 For explicit dimmer fade rates and stop-ramp commands (Release 6), see
 [docs/RAMP-CONTROL.md](docs/RAMP-CONTROL.md). Existing controls keep their behavior.
+
+Release 7 adds configurable passive status monitoring; see
+[docs/PASSIVE-STATUS.md](docs/PASSIVE-STATUS.md) for the trial and its limits.

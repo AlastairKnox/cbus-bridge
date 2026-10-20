@@ -406,6 +406,66 @@ mqtt:
     default_entity_id: sensor.cbus_diag_queue_discarded
     value_template: "{{ value_json.diagnostics.counters.get('queue_disconnect_discarded_total', 0) }}"
     state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: MONITOR requested
+    unique_id: cbus_diag_monitor_requested
+    default_entity_id: sensor.cbus_diag_monitor_requested
+    value_template: "{{ 'on' if value_json.cni_monitor_requested and value_json.cni_initialization_enabled else 'off' }}"
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: Passive status reports
+    unique_id: cbus_diag_binary_reports
+    default_entity_id: sensor.cbus_diag_binary_reports
+    value_template: "{{ value_json.diagnostics.counters.get('binary_status_reports_total', 0) }}"
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: Last passive status report age
+    unique_id: cbus_diag_binary_report_age
+    default_entity_id: sensor.cbus_diag_binary_report_age
+    value_template: "{{ value_json.diagnostics.last_binary_report_age_s if value_json.diagnostics.last_binary_report_age_s is not none else 'unknown' }}"
+    state_class: measurement
+    unit_of_measurement: s
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: Groups reporting binary error
+    unique_id: cbus_diag_binary_errors
+    default_entity_id: sensor.cbus_diag_binary_errors
+    value_template: "{{ value_json.diagnostics.binary_error_configured_groups }}"
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: Binary state updates
+    unique_id: cbus_diag_binary_publishes
+    default_entity_id: sensor.cbus_diag_binary_publishes
+    value_template: "{{ value_json.diagnostics.counters.get('binary_state_publishes_total', 0) }}"
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device: *id001
+    name: Shared numeric topics skipped
+    unique_id: cbus_diag_binary_shared_skips
+    default_entity_id: sensor.cbus_diag_binary_shared_skips
+    value_template: "{{ value_json.diagnostics.counters.get('binary_shared_topic_skips_total', 0) }}"
+    state_class: total_increasing
 recorder:
   exclude:
     entities:

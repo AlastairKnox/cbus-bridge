@@ -126,7 +126,7 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(diagnose_frame('05033800790800'), 'checksum_failure')
         self.assertEqual(diagnose_frame(packet([5, 3, 56, 0, 0x0a, 8])), 'malformed')
         self.assertEqual(diagnose_frame(packet([5, 3, 56, 0, 0xff, 8])), 'unsupported')
-        self.assertEqual(diagnose_frame(packet([0xc2, 56, 0])), 'unsupported')
+        self.assertEqual(diagnose_frame(packet([0xc2, 56, 0])), 'malformed')
         self.assertEqual(diagnose_frame('hello'), 'nonhex')
         self.assertEqual(diagnose_frame(packet([5, 3, 202, 0, 1, 8])), 'unsupported')
 

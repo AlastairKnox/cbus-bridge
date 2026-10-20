@@ -75,6 +75,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="Path to file containing your HA mqtt: YAML (or just the mqtt: block).")
 
     ap.add_argument("--init", action="store_true", help="Send CNI init sequence.")
+    ap.add_argument("--monitor", action=argparse.BooleanOptionalAction, default=False,
+                    help="Enable passive status monitoring during --init; does not request extra reports.")
     ap.add_argument("--status", action="store_true", help="Request status blocks for groups found in HA config.")
     ap.add_argument("--status-include-96", action="store_true", help="Legacy flag; --status now queries every configured group block.")
 
@@ -107,6 +109,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    if args.monitor and not args.init:
+        parser.error("--monitor requires --init so interface options can be set")
     if args.readonly and args.enable_writes:
         parser.error("--readonly and --enable-writes cannot be combined")
 
@@ -202,6 +206,8 @@ def main(argv=None) -> int:
             "mqtt_port": args.mqtt_port,
 
             "readonly": bool(readonly),
+            "cni_monitor_requested": bool(args.monitor),
+            "cni_initialization_enabled": bool(args.init and not readonly),
 
             "mqtt_connects_total": metrics.mqtt_connects_total,
             "mqtt_disconnects_total": metrics.mqtt_disconnects_total,
@@ -398,7 +404,7 @@ def main(argv=None) -> int:
                 publish_status("cni_connected")
 
                 bridge.run_forever(init=args.init, status=args.status, status_include_96=args.status_include_96,
-                                   on_ready=lambda: worker.ready_cni(session_token))
+                                   on_ready=lambda: worker.ready_cni(session_token), monitor=args.monitor)
 
             except Exception as e:
                 worker.set_link("cni", False)

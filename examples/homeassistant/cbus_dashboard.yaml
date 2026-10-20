@@ -29,6 +29,21 @@ views:
             name: "CNI reconnects"
           - entity: sensor.cbus_diag_mqtt_reconnects
             name: "MQTT reconnects"
+      - type: entities
+        title: Passive status monitoring
+        entities:
+          - entity: sensor.cbus_diag_monitor_requested
+            name: MONITOR requested
+          - entity: sensor.cbus_diag_binary_reports
+            name: Reports received
+          - entity: sensor.cbus_diag_binary_report_age
+            name: Last report age
+          - entity: sensor.cbus_diag_binary_errors
+            name: Groups reporting error
+          - entity: sensor.cbus_diag_binary_publishes
+            name: State updates
+          - entity: sensor.cbus_diag_binary_shared_skips
+            name: Shared numeric topics skipped
       - type: history-graph
         title: Traffic over time
         hours_to_show: 2
@@ -116,9 +131,9 @@ views:
           {% else %}
           Reported level = C-Bus status. Observed command = a target, not measured output. Transmitted = successful command ACK only. Age is observation age, not a fault timeout.
 
-          | Group | Raw level (0–255) | Confidence | Observation age | Status |
-          | :--- | :--- | :--- | :--- | :--- |
+          | Group | Raw level (0–255) | Confidence | Observation age | Level status | Binary status | Binary age |
+          | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
           {% for g in state_attr('sensor.cbus_diag_groups', 'groups') or [] -%}
-          | {{ g.group }} | {{ g.published_level if g.published_level is not none else 'unknown' }} | {{ g.confidence }} | {{ (g.observation_age_s | string) + ' s' if g.observation_age_s is not none else 'never' }} | {{ g.status_quality }} |
+          | {{ g.group }} | {{ g.published_level if g.published_level is not none else 'unknown' }} | {{ g.confidence }} | {{ (g.observation_age_s | string) + ' s' if g.observation_age_s is not none else 'never' }} | {{ g.status_quality }} | {{ g.binary_status | default('not_observed') }} | {{ (g.binary_observation_age_s | string) + ' s' if g.binary_observation_age_s is defined and g.binary_observation_age_s is not none else 'never' }} |
           {% endfor %}
           {% endif %}

@@ -28,6 +28,15 @@ class StatusReply:
     levels: Dict[int, Optional[int]]  # group -> level255 (None if N/A)
     raw_hex: str
 
+@dataclass
+class BinaryStatusReply:
+    hdr: int
+    app: int
+    start_group: int
+    states: Dict[int, str]  # absent / on / off / error; never brightness
+    raw_hex: str
+
+
 # CBUS-QS sections 4.3, 7; CBUS-SIUG sections 6 and 7.4.
 # CBUS-QS 6.3: nominal time for a complete 0..255 change, not a
 # guaranteed point-to-point duration. Hardware performs the ramp.
@@ -124,16 +133,43 @@ def parse_status_reply(hexline: str) -> Optional[StatusReply]:
                        levels=levels, raw_hex=hexline)
 
 
+def parse_binary_status_reply(hexline: str) -> Optional[BinaryStatusReply]:
+    """CBUS-SIUG 7.3: standard short-form status (EXSTAT off).
+
+    The header counts application, start and packed data; excludes checksum.
+    Four groups per byte, least significant bit pair first. Error can mean
+    inconsistent outputs OR a unit requesting initialization, not proven noise.
+    """
+    b = _checked_frame(hexline)
+    if b is None or len(b) < 5 or not 0xC0 <= b[0] < 0xE0:
+        return None
+    declared = b[0] - 0xC0
+    if len(b) != declared + 2 or declared < 3:
+        return None
+    count = (declared - 2) * 4
+    if b[2] + count > 256:
+        return None
+    names = ('absent', 'on', 'off', 'error')
+    states = {b[2] + i * 4 + offset: names[(byte >> (offset * 2)) & 3]
+              for i, byte in enumerate(b[3:-1]) for offset in range(4)}
+    return BinaryStatusReply(b[0], b[1], b[2], states, hexline)
+
+
 def diagnose_frame(hexline: str) -> str:
     """Classify supported envelopes without labelling unrelated traffic corrupt."""
     if not hexline or len(hexline) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", hexline):
         return "nonhex"
     b = bytes.fromhex(hexline)
-    supported = b[0] == 0x05 or (b[0] >= 0xE0 and len(b) > 1 and b[1] in (0x07, 0x47))
+    binary = 0xC0 <= b[0] < 0xE0
+    supported = binary or b[0] == 0x05 or (b[0] >= 0xE0 and len(b) > 1 and b[1] in (0x07, 0x47))
     if not supported:
         return "unsupported"
     if sum(b) % 256:
         return "checksum_failure"
+    if binary:
+        if len(b) > 1 and b[1] != 0x38:
+            return "unsupported"
+        return "binary_status" if parse_binary_status_reply(hexline) else "malformed"
     if len(b) > 2 and b[2] != 0x38:
         return "unsupported"
     if b[0] >= 0xE0:
