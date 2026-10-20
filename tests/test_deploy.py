@@ -24,6 +24,9 @@ class FakeDeployment(deploy.Deployment):
     def preflight(self, stage):
         return self.config
 
+    def validate_profiles(self, stage, config):
+        pass
+
     def health(self):
         if self.fail_health_once:
             self.fail_health_once = False
@@ -154,6 +157,16 @@ class DeploymentTests(unittest.TestCase):
         with patch.object(self.d, 'ctl', side_effect=lambda *a: '123' if a[0] == 'show' else ''), \
              patch.object(deploy.time, 'sleep'):
             deploy.Deployment.health(self.d)
+
+    def test_candidate_mapping_validation_failure_is_private(self):
+        result = type('Result', (), {'returncode': 1, 'stderr': 'private YAML content'})()
+        with patch.object(deploy.subprocess, 'run', return_value=result) as run:
+            with self.assertRaisesRegex(RuntimeError, 'active HA mapping') as error:
+                deploy.Deployment.validate_profiles(self.d, self.stage, self.config)
+        self.assertNotIn('private YAML content', str(error.exception))
+        self.assertEqual(run.call_args.kwargs['cwd'], self.stage)
+        self.assertTrue(run.call_args.kwargs['capture_output'])
+        self.assertNotIn(('stop', deploy.SERVICE), self.d.calls)
 
     def test_config_change_during_snapshot_aborts_before_stop(self):
         original_snapshot = self.d.snapshot

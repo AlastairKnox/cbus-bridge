@@ -322,7 +322,7 @@ class CbusMqttBridge:
                 "[readonly] Would send cmd=0x%02X group=%d level=%s%s",
                 cmd, group, level, self._label_suffix_for(app_byte, group)
             )
-            return True
+            return False
 
         group = clamp(int(group), 0, 255)
         b = bytearray([0x05, app_byte, 0x00, cmd, group])
@@ -391,6 +391,11 @@ class CbusMqttBridge:
         p = self._get_profile(net, app, group)
         if p is None:
             LOG.warning("Ignoring write to unknown group=%d (net=%d app=%d)", group, net, app)
+            return
+
+        allowed_topic = p.command_topic if action == "switch" else p.level_command_topic
+        if topic != allowed_topic:
+            LOG.warning("Ignoring command not enabled for this profile")
             return
 
         is_fan = (p.level_mode == "fan")
@@ -478,6 +483,9 @@ class CbusMqttBridge:
         """
         PCI init sequence used in your setup.
         """
+        if self.readonly:
+            LOG.info("[readonly] Skipping CNI initialization")
+            return
         self.cni.send_line("~~~")
         time.sleep(0.1)
         if app != 56:
@@ -491,6 +499,9 @@ class CbusMqttBridge:
         time.sleep(0.05)
 
     def request_status_blocks(self, app_byte: int, groups: Set[int], include_96: bool = False) -> None:
+        if self.readonly:
+            LOG.info("[readonly] Skipping CNI status requests")
+            return
         if not groups:
             return
         max_g = max(groups)
@@ -510,6 +521,9 @@ class CbusMqttBridge:
             time.sleep(0.2)
 
     def request_resync(self, mode: str = "configured") -> None:
+        if self.readonly:
+            LOG.info("[readonly] Skipping CNI resync")
+            return
         apps = {k[1] for k in self.profiles.keys()}
         app = 56 if 56 in apps else (next(iter(apps)) if apps else 56)
         app_byte = 0x38 if app == 56 else app

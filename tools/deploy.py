@@ -121,7 +121,19 @@ class Deployment:
             [str(self.live / '.venv/bin/python'), '-B', '-c', probe, *names], text=True))
         if any(versions[n] != v for n, v in (line.split('==') for line in requirements)):
             raise RuntimeError('Installed dependencies differ; refusing to change the live venv')
+        self.validate_profiles(stage, config)
         return config
+
+    def validate_profiles(self, stage, config):
+        # Load candidate code against the active mapping without opening MQTT/CNI.
+        # Suppress parser output: YAML diagnostics may contain sensitive source lines.
+        probe = "from cbus_bridge.ha_profiles import load_ha_mqtt_profiles; import sys; load_ha_mqtt_profiles(sys.argv[1])"
+        result = subprocess.run(
+            [str(self.live / '.venv/bin/python'), '-B', '-c', probe, str(config)],
+            cwd=stage, capture_output=True, text=True,
+        )
+        if result.returncode:
+            raise RuntimeError('Candidate rejected the active HA mapping; production was not changed. Review configuration compatibility privately.')
 
     def snapshot(self, stage, commit, config):
         self.backups.mkdir(parents=True, mode=0o700, exist_ok=True)

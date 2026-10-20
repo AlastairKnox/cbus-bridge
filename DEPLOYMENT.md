@@ -29,7 +29,9 @@ bash tools/release.sh check COMMIT
 This fetches GitHub, resolves an exact commit reachable from origin/main, stages
 only that commit in a temporary directory, runs its offline tests with the live
 venv interpreter, and checks production configuration, service and dependency
-compatibility. It does not install files, back up production or restart the
+compatibility. It also loads the active HA mapping using the candidate profile
+loader, without opening MQTT/CNI connections or displaying YAML contents. It does
+not install files, back up production or restart the
 service. `check` is not a backup/rollback rehearsal; `apply` performs that next.
 
 When ready for a brief outage:

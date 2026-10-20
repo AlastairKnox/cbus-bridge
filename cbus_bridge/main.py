@@ -77,7 +77,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--readonly", action="store_true", help="Do not write to CNI; only publish updates to MQTT.")
     ap.add_argument("--log-level", default="INFO")
 
-    ap.add_argument("--enable-writes", action="store_true", help="(legacy) Force writes on (overrides --readonly).")
+    ap.add_argument("--enable-writes", action="store_true", help="Legacy flag; cannot be combined with --readonly.")
 
     # Resync / get_all fallback
     ap.add_argument("--resync-every", type=int, default=0,
@@ -96,7 +96,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    args = build_arg_parser().parse_args(argv)
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    if args.readonly and args.enable_writes:
+        parser.error("--readonly and --enable-writes cannot be combined")
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -106,7 +109,7 @@ def main(argv=None) -> int:
     profiles = load_ha_mqtt_profiles(args.ha_config)
     LOG.info("Loaded %d C-Bus group profiles from HA config", len(profiles))
 
-    readonly = args.readonly and (not args.enable_writes)
+    readonly = args.readonly
 
     mqtt_up = threading.Event()
     cni_up = threading.Event()
@@ -252,6 +255,9 @@ def main(argv=None) -> int:
         metrics.last_mqtt_rx_ts = now_epoch()
 
         try:
+            if msg.retain:
+                LOG.warning("Ignoring retained MQTT command")
+                return
             if msg.topic == args.resync_topic:
                 text = msg.payload.decode("utf-8", errors="ignore").strip().lower()
 

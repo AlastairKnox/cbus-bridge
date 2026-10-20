@@ -48,6 +48,80 @@ def parse_group_from_topic(topic: str) -> Optional[Tuple[int, int, int]]:
     return int(m.group(1)), int(m.group(2)), int(m.group(3))
 
 
+def validate_mqtt_config(mqtt_root: object) -> None:
+    """Validate C-Bus entity addressing before building any profiles.
+
+    Errors identify fields/entry positions, never config values or credentials.
+    Non-C-Bus MQTT entities are outside this loader's scope.
+    """
+    if not isinstance(mqtt_root, dict):
+        raise ValueError("mqtt must be a mapping")
+    seen_groups = set()
+    seen_topics = set()
+    roles = {
+        "state_topic": ("read", {"state", "level"}),
+        "command_topic": ("write", {"switch"}),
+        "brightness_state_topic": ("read", {"level"}),
+        "brightness_command_topic": ("write", {"ramp"}),
+        "preset_mode_state_topic": ("read", {"level"}),
+        "preset_mode_command_topic": ("write", {"ramp"}),
+    }
+    for kind in ("light", "fan", "binary_sensor"):
+        entries = mqtt_root.get(kind)
+        if entries is None:
+            entries = []
+        if not isinstance(entries, list):
+            raise ValueError(f"mqtt.{kind} must be a list")
+        for index, entity in enumerate(entries):
+            if not isinstance(entity, dict):
+                raise ValueError(f"mqtt.{kind}[{index}] must be a mapping")
+            if not any(isinstance(entity.get(k), str) and entity[k].startswith("cbus/") for k in roles):
+                continue
+            label = f"mqtt.{kind}[{index}]"
+            required = ["state_topic"] if kind == "binary_sensor" else ["state_topic", "command_topic"]
+            for field in required:
+                if not isinstance(entity.get(field), str) or not entity[field]:
+                    raise ValueError(f"{label}.{field} is required")
+            pairs = [("brightness_state_topic", "brightness_command_topic"),
+                     ("preset_mode_state_topic", "preset_mode_command_topic")]
+            for left, right in pairs:
+                if (left in entity) != (right in entity):
+                    raise ValueError(f"{label} requires both {left} and {right}")
+            address = None
+            for field, (direction, endings) in roles.items():
+                if field not in entity:
+                    continue
+                topic = entity[field]
+                match = re.fullmatch(r"cbus/(read|write)/(\d+)/(\d+)/(\d+)/([^/]+)", topic) if isinstance(topic, str) else None
+                if not match or match[1] != direction or match[5] not in endings:
+                    raise ValueError(f"{label}.{field} has an unsupported C-Bus topic format")
+                key = tuple(int(match[n]) for n in (2, 3, 4))
+                if any(not 0 <= value <= 255 for value in key):
+                    raise ValueError(f"{label}.{field} address must be within 0..255")
+                if address is not None and address != key:
+                    raise ValueError(f"{label} topics refer to different groups")
+                address = key
+                # State and brightness may intentionally share the same level topic.
+                owner = (kind, index)
+                for existing_topic, existing_owner in seen_topics:
+                    if existing_topic == topic and existing_owner != owner:
+                        raise ValueError(f"{label}.{field} conflicts with another entity")
+                seen_topics.add((topic, owner))
+            if address in seen_groups:
+                raise ValueError(f"{label} duplicates a C-Bus group")
+            seen_groups.add(address)
+            if "brightness_state_topic" in entity:
+                scale = entity.get("brightness_scale", 100)
+                if isinstance(scale, bool):
+                    raise ValueError(f"{label}.brightness_scale must be a positive integer")
+                try:
+                    parsed = int(scale)
+                except (ValueError, TypeError, OverflowError):
+                    raise ValueError(f"{label}.brightness_scale must be a positive integer") from None
+                if parsed <= 0 or str(parsed) != str(scale):
+                    raise ValueError(f"{label}.brightness_scale must be a positive integer")
+
+
 def load_ha_mqtt_profiles(path: str) -> Dict[Tuple[int, int, int], GroupProfile]:
     """
     Read HA mqtt: YAML and build a per-group profile that preserves topics.
@@ -63,6 +137,7 @@ def load_ha_mqtt_profiles(path: str) -> Dict[Tuple[int, int, int], GroupProfile]
     if "mqtt" in doc and isinstance(doc["mqtt"], dict):
         mqtt_root = doc["mqtt"]
 
+    validate_mqtt_config(mqtt_root)
     profiles: Dict[Tuple[int, int, int], GroupProfile] = {}
 
     def upsert_profile(
