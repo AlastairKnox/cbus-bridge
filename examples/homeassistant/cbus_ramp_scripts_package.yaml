@@ -1,0 +1,99 @@
+# PROPOSED ONLY. Requires bridge Release 6 and separate approval before installation.
+# Example for this site's dimmers with brightness_scale: 100. No automatic triggers.
+script:
+  cbus_ramp_light:
+    alias: C-Bus · Ramp a dimmer
+    description: Native ramp rate is the full 0–100% travel time; partial fades take less time.
+    mode: parallel
+    max: 10
+    fields:
+      group:
+        name: Dimmer group
+        description: Use a configured dimmable lighting group.
+        required: true
+        selector:
+          number:
+            min: 0
+            max: 255
+            step: 1
+            mode: box
+      level:
+        name: Target brightness
+        required: true
+        selector:
+          number:
+            min: 0
+            max: 100
+            step: 1
+            unit_of_measurement: '%'
+      ramp_seconds:
+        name: Full-scale ramp time
+        required: true
+        selector:
+          select:
+            options:
+              - '0'
+              - '4'
+              - '8'
+              - '12'
+              - '20'
+              - '30'
+              - '40'
+              - '60'
+              - '90'
+              - '120'
+              - '180'
+              - '300'
+              - '420'
+              - '600'
+              - '900'
+              - '1020'
+    sequence:
+      - if:
+          - condition: template
+            value_template: >-
+              {{ not (group is defined and group is number and group is not boolean
+                  and group == group | int and 0 <= group <= 255
+                  and level is defined and level is number and level is not boolean
+                  and level == level | int and 0 <= level <= 100
+                  and ramp_seconds is defined
+                  and ramp_seconds | string in ['0','4','8','12','20','30','40','60','90','120','180','300','420','600','900','1020']) }}
+        then:
+          - stop: Supply a valid dimmer group, brightness and supported full-scale ramp time.
+            error: true
+      - action: mqtt.publish
+        data:
+          topic: 'cbus/write/254/56/{{ group | int }}/ramp'
+          payload: "{{ {'level': level | int, 'ramp_seconds': ramp_seconds | int} | to_json }}"
+          qos: 0
+          retain: false
+  cbus_stop_ramp:
+    alias: C-Bus · Stop a dimmer ramp
+    description: Stop at the current hardware level; no brightness is guessed.
+    mode: parallel
+    max: 10
+    fields:
+      group:
+        name: Dimmer group
+        required: true
+        selector:
+          number:
+            min: 0
+            max: 255
+            step: 1
+            mode: box
+    sequence:
+      - if:
+          - condition: template
+            value_template: >-
+              {{ not (group is defined and group is number and group is not boolean
+                  and group == group | int and 0 <= group <= 255) }}
+        then:
+          - stop: Supply a valid dimmer group.
+            error: true
+      - action: mqtt.publish
+        data:
+          topic: 'cbus/write/254/56/{{ group | int }}/ramp'
+          payload: '{"stop":true}'
+          qos: 0
+          retain: false

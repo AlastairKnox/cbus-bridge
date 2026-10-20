@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple, Set, List
 import paho.mqtt.client as mqtt
 
 from .cni_connection import CniConnection
-from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame
+from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame, RAMP_CODES
 from .ha_profiles import GroupProfile
 from .utils import (
     BridgeDiagnostics,
@@ -20,6 +20,7 @@ from .utils import (
     level255_to_pct,
     normalize_hex_from_bytes,
     parse_first_int,
+    parse_transition_payload,
     pct_to_level255,
     quantize_fan_level,
 )
@@ -443,6 +444,34 @@ class CbusMqttBridge:
     def write_ramp_to_level(self, app_byte: int, group: int, level255: int, ramp_cmd: int) -> bool:
         return self._send_lighting_command(app_byte=app_byte, cmd=ramp_cmd, group=group, level=level255)
 
+    def _handle_transition(self, profile, text):
+        if profile.level_mode != 'pct' or not profile.level_command_topic:
+            self.diagnostics.bump('transition_rejected_total')
+            return
+        try:
+            action, level, seconds = parse_transition_payload(text, profile.pct_scale)
+        except ValueError:
+            self.diagnostics.bump('transition_rejected_total')
+            LOG.warning('Rejected invalid dimmer transition')
+            return
+        self.diagnostics.bump('transition_requests_total')
+        if action == 'stop':
+            # Stop carries no level. Never invent the stopped brightness.
+            ok = self._send_lighting_command(app_byte=profile.app, cmd=0x09,
+                                              group=profile.group, level=None)
+            target = None
+        else:
+            target = pct_to_level255(level, profile.pct_scale)
+            # Even target zero must use RAMP, rather than immediate OFF.
+            ok = self.write_ramp_to_level(profile.app, profile.group, target, RAMP_CODES[seconds])
+        if ok:
+            def record():
+                self._cancel_pending_synthetic_level(profile.app, profile.group)
+                self.diagnostics.transition_transmitted(profile, target, seconds, stopped=action == 'stop')
+            self._guarded(record, expire=False)
+            # These opt-in commands do not publish a target as current brightness,
+            # even at rate zero: only subsequent monitored/status traffic does.
+
     # ----------------------------
     # MQTT command handling (publish ONLY on ACK success)
     # ----------------------------
@@ -504,6 +533,20 @@ class CbusMqttBridge:
                 return
 
             LOG.warning("Unexpected switch payload for group=%d%s: %r", group, p_suffix, text)
+            return
+
+        # Structured transitions are opt-in on an already permitted brightness
+        # topic. Preserve the existing numeric/comma behavior for HA controls.
+        if text.startswith(('{', '[', '"', '\ufeff')):
+            if len(payload) > 256:
+                self.diagnostics.bump('transition_rejected_total')
+                return
+            try:
+                strict_text = payload.decode('utf-8').strip()
+            except UnicodeDecodeError:
+                self.diagnostics.bump('transition_rejected_total')
+                return
+            self._handle_transition(p, strict_text)
             return
 
         # action == "ramp"
@@ -723,6 +766,10 @@ class CbusMqttBridge:
                 self.diagnostics.observed(sal.app, sal.group)
                 self.diagnostics.event("lighting", "RX", app=sal.app, group=sal.group,
                                        unit=sal.dev, command=sal.cmd, level=sal.level)
+                if sal.cmd == 0x09:
+                    self._cancel_pending_synthetic_level(sal.app, sal.group)
+                    self.diagnostics.bump('transition_stops_observed_total')
+                    continue
                 if sal.level is not None:
                     lvl = sal.level
 

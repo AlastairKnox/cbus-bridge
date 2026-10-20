@@ -19,3 +19,6 @@ Commit and push changes from the desktop. Fetch/pull into the separate cgate che
 The original runtime source and settings remain on cgate. Virtual environments, generated files, and legacy scratch versions are not tracked.
 
 For repeatable checks, installation and rollback, see [DEPLOYMENT.md](DEPLOYMENT.md).
+
+For explicit dimmer fade rates and stop-ramp commands (Release 6), see
+[docs/RAMP-CONTROL.md](docs/RAMP-CONTROL.md). Existing controls keep their behavior.

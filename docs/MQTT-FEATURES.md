@@ -16,7 +16,7 @@ MQTT updates should not be described as measured lamp/fan feedback.
 | Addition | Current gap | What we need before implementing |
 | --- | --- | --- |
 | Bus events | Source unit and command details are parsed but not exposed as events | Define a non-retained event schema and choose useful HA triggers |
-| Transition/ramp controls | Writes use a fixed ramp code; extra comma payload data is currently ignored | Agree duration/rate semantics and stop/readback behavior |
+| Transition/ramp controls | Release 6 adds opt-in native rates and stop on existing dimmer brightness topics; legacy commands keep their fixed rate | See [RAMP-CONTROL.md](RAMP-CONTROL.md) for full-scale semantics and acceptance |
 | Native scene triggers | No Trigger Control application support | Toolkit/project or passive traffic evidence of actual scene trigger groups/actions |
 | Enable controls | No Enable Control application support | Determine which enables use that application and which are ordinary lighting groups |
 | Numeric sensors | Binary profiles expose only group ON/OFF | Inventory actual measurement-capable units and their application/units/scaling |

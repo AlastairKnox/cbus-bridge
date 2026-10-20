@@ -183,6 +183,19 @@ class BridgeDiagnostics:
                          confidence='reported_level' if source == 'STATUS' else
                          'transmitted' if source == 'ACK' else 'observed_command')
 
+    def transition_transmitted(self, profile, target, seconds, *, stopped=False):
+        key = f'{profile.net}/{profile.app}/{profile.group}'
+        with self.lock:
+            if key in self.groups:
+                self.groups[key]['last_transition'] = {
+                    'ts': int(self.wall()), 'target_level': target,
+                    'full_scale_seconds': seconds,
+                    'result': 'stop_transmitted' if stopped else 'target_transmitted',
+                }
+        self.bump('transition_stop_transmitted_total' if stopped else 'transition_transmitted_total')
+        self.event('transition_stop_transmitted' if stopped else 'transition_transmitted', 'LOCAL',
+                   app=profile.app, group=profile.group, level=target, full_scale_seconds=seconds)
+
     def request(self, app, start):
         with self.lock:
             self.counters['status_requests_total'] += 1
@@ -249,6 +262,8 @@ class BridgeDiagnostics:
             for state in self.groups.values():
                 row = {k: v for k, v in state.items() if k not in ('last_bus_mono', 'pending_since')}
                 row['observation_age_s'] = None if state['last_bus_mono'] is None else round(now - state['last_bus_mono'], 1)
+                if 'last_transition' in row:
+                    row['last_transition'] = dict(row['last_transition'])
                 row['status_pending_age_s'] = None if state['pending_since'] is None else round(now - state['pending_since'], 1)
                 groups.append(row)
             return {'ts': int(self.wall()), 'groups': groups}
@@ -416,3 +431,34 @@ class CommandWorker:
         with self.condition:
             self.stopped = True
         self.set_link('cni', False)
+
+
+def parse_transition_payload(text, scale):
+    """Strict opt-in JSON; legacy numeric/comma payloads are handled separately."""
+    import json
+    from .cni_protocol import RAMP_CODES
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate transition field')
+            result[key] = value
+        return result
+
+    try:
+        obj = json.loads(text, object_pairs_hook=unique_object)
+    except (ValueError, RecursionError) as exc:
+        raise ValueError('Invalid transition JSON') from exc
+    if not isinstance(obj, dict):
+        raise ValueError('Transition must be an object')
+    if set(obj) == {'stop'} and obj['stop'] is True:
+        return 'stop', None, None
+    if set(obj) != {'level', 'ramp_seconds'}:
+        raise ValueError('Expected level and ramp_seconds, or stop=true')
+    level, seconds = obj['level'], obj['ramp_seconds']
+    if type(level) is not int or not 0 <= level <= scale:
+        raise ValueError('Transition level outside profile brightness scale')
+    if type(seconds) is not int or seconds not in RAMP_CODES:
+        raise ValueError('Unsupported full-scale ramp rate')
+    return 'ramp', level, seconds

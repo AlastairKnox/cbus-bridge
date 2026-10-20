@@ -29,7 +29,11 @@ class StatusReply:
     raw_hex: str
 
 # CBUS-QS sections 4.3, 7; CBUS-SIUG sections 6 and 7.4.
-RAMP_COMMANDS = frozenset(range(0x02, 0x7B, 8))
+# CBUS-QS 6.3: nominal time for a complete 0..255 change, not a
+# guaranteed point-to-point duration. Hardware performs the ramp.
+RAMP_SECONDS = (0, 4, 8, 12, 20, 30, 40, 60, 90, 120, 180, 300, 420, 600, 900, 1020)
+RAMP_CODES = dict(zip(RAMP_SECONDS, range(0x02, 0x7B, 8)))
+RAMP_COMMANDS = frozenset(RAMP_CODES.values())
 
 
 def _checked_frame(hexline: str) -> Optional[bytes]:
