@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple, Set, List
 import paho.mqtt.client as mqtt
 
 from .cni_connection import CniConnection
-from .cni_protocol import parse_monitored_sal, parse_status_reply
+from .cni_protocol import parse_monitored_sals, parse_status_reply
 from .ha_profiles import GroupProfile
 from .utils import (
     clamp,
@@ -504,15 +504,9 @@ class CbusMqttBridge:
             return
         if not groups:
             return
-        max_g = max(groups)
-
-        starts = [0, 32, 64]
-        if include_96 and max_g >= 96:
-            starts.append(96)
-
+        # include_96 is retained for CLI compatibility; every configured block is queried.
+        starts = sorted({(group // 32) * 32 for group in groups})
         for start in starts:
-            if start > max_g:
-                continue
             frame = bytes([0x05, 0xFF, 0x00, 0x73, 0x07, app_byte, start])
             cks = checksum_2s_complement(frame)
             payload = frame.hex().upper() + f"{cks:02X}"
@@ -607,8 +601,8 @@ class CbusMqttBridge:
                     self.handle_cbus_level_update(app=sr.app, group=g, level255=lvl, source="STATUS")
                 continue
 
-            sal = parse_monitored_sal(norm)
-            if sal and sal.app == 0x38:
+            sals = parse_monitored_sals(norm)
+            for sal in (item for item in sals if item.app == 0x38):
                 if sal.level is not None:
                     lvl = sal.level
 
@@ -676,4 +670,6 @@ class CbusMqttBridge:
                 )
                 continue
 
+            if sals:
+                continue
             LOG.debug("Unparsed RX line: raw=%r norm=%s", raw, norm)

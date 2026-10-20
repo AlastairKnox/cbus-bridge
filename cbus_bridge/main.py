@@ -72,7 +72,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     ap.add_argument("--init", action="store_true", help="Send CNI init sequence.")
     ap.add_argument("--status", action="store_true", help="Request status blocks for groups found in HA config.")
-    ap.add_argument("--status-include-96", action="store_true", help="Also request start_group=96 when doing --status.")
+    ap.add_argument("--status-include-96", action="store_true", help="Legacy flag; --status now queries every configured group block.")
 
     ap.add_argument("--readonly", action="store_true", help="Do not write to CNI; only publish updates to MQTT.")
     ap.add_argument("--log-level", default="INFO")

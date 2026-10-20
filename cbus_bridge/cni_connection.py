@@ -197,12 +197,15 @@ class CniConnection:
                 return ack
 
             # Normal line-delimited traffic
-            nl = self._rxbuf.find(b"\n")
+            delimiters = [n for n in (self._rxbuf.find(b"\r"), self._rxbuf.find(b"\n")) if n != -1]
+            nl = min(delimiters) if delimiters else -1
             if nl != -1:
                 line = bytes(self._rxbuf[:nl])
                 del self._rxbuf[: nl + 1]
-                if line.endswith(b"\r"):
-                    line = line[:-1]
+                # Consume a CRLF pair together when already buffered. A split LF
+                # may yield an empty line, which the read loop safely ignores.
+                if self._rxbuf[:1] == b"\n":
+                    del self._rxbuf[:1]
                 return line
 
             # Need more data

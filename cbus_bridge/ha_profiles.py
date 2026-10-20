@@ -98,6 +98,8 @@ def validate_mqtt_config(mqtt_root: object) -> None:
                 key = tuple(int(match[n]) for n in (2, 3, 4))
                 if any(not 0 <= value <= 255 for value in key):
                     raise ValueError(f"{label}.{field} address must be within 0..255")
+                if key[0] != 254 or key[1] != 56:
+                    raise ValueError(f"{label}.{field} requires supported local network 254 and lighting application 56")
                 if address is not None and address != key:
                     raise ValueError(f"{label} topics refer to different groups")
                 address = key

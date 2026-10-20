@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, List
+import re
 
 
 # ----------------------------
@@ -27,36 +28,52 @@ class StatusReply:
     levels: Dict[int, Optional[int]]  # group -> level255 (None if N/A)
     raw_hex: str
 
-def parse_monitored_sal(hexline: str) -> Optional[MonitoredSAL]:
-    # Expect at least: 05 ss 38 00 cc gg zz  (7 bytes)
-    if len(hexline) < 14:
-        return None
-    try:
-        b = bytes.fromhex(hexline)
-    except ValueError:
-        return None
-    if b[0] != 0x05 or len(b) < 7:
-        return None
+# CBUS-QS sections 4.3, 7; CBUS-SIUG sections 6 and 7.4.
+RAMP_COMMANDS = frozenset(range(0x02, 0x7B, 8))
 
-    dev = b[1]
-    app = b[2]
 
-    # Two valid formats per Clipsal docs:
-    #   05 ss 38 00 cc gg [tt] zz
-    #   05 ss 38 01 00 cc gg [tt] zz
+def _checked_frame(hexline: str) -> Optional[bytes]:
+    if not hexline or len(hexline) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", hexline):
+        return None
+    frame = bytes.fromhex(hexline)
+    return frame if sum(frame) % 256 == 0 else None
+
+
+def parse_monitored_sals(hexline: str) -> List[MonitoredSAL]:
+    """Decode all supported commands atomically from a local SMART-mode packet.
+
+    Unknown/truncated commands reject the whole packet; bytes must never be guessed
+    to be levels. TERMINATE RAMP has no level and is consumed without inventing one.
+    Routed traffic is deliberately unsupported until routing is implemented.
+    """
+    b = _checked_frame(hexline)
+    if b is None or len(b) < 7 or b[0] != 0x05:
+        return []
     if b[3] == 0x00:
-        cmd = b[4]
-        group = b[5]
-        level = b[6] if len(b) >= 8 else None
-        return MonitoredSAL(dev=dev, app=app, cmd=cmd, group=group, level=level, raw_hex=hexline)
+        start = 4
+    elif b[3:5] == b"\x01\x00":
+        start = 5
+    else:
+        return []
+    end = len(b) - 1  # The checksum is not SAL payload.
+    commands = []
+    while start < end:
+        cmd = b[start]
+        width = 3 if cmd in RAMP_COMMANDS else 2 if cmd in (0x01, 0x79, 0x09) else None
+        if width is None or start + width > end:
+            return []
+        commands.append(MonitoredSAL(
+            dev=b[1], app=b[2], cmd=cmd, group=b[start + 1],
+            level=b[start + 2] if width == 3 else None, raw_hex=hexline,
+        ))
+        start += width
+    return commands
 
-    if b[3] == 0x01 and len(b) >= 8 and b[4] == 0x00:
-        cmd = b[5]
-        group = b[6]
-        level = b[7] if len(b) >= 9 else None
-        return MonitoredSAL(dev=dev, app=app, cmd=cmd, group=group, level=level, raw_hex=hexline)
 
-    return None
+def parse_monitored_sal(hexline: str) -> Optional[MonitoredSAL]:
+    """Compatibility helper for callers expecting exactly one command."""
+    commands = parse_monitored_sals(hexline)
+    return commands[0] if len(commands) == 1 else None
 
 
 def decode_status_packed4(packed4: str) -> Optional[int]:
@@ -83,35 +100,21 @@ def decode_status_packed4(packed4: str) -> Optional[int]:
 
 
 def parse_status_reply(hexline: str) -> Optional[StatusReply]:
-    if len(hexline) < 8:
+    """Short-form extended LEVEL status; header count excludes outer checksum."""
+    b = _checked_frame(hexline)
+    if b is None or len(b) < 7 or b[0] < 0xE0 or b[1] not in (0x07, 0x47):
         return None
-    try:
-        hdr = int(hexline[0:2], 16)
-        coding = int(hexline[2:4], 16)
-        app = int(hexline[4:6], 16)
-        start_group = int(hexline[6:8], 16)
-    except ValueError:
+    declared = b[0] - 0xE0
+    payload_bytes = declared - 3  # coding, application and block start
+    if payload_bytes <= 0 or payload_bytes % 2 or len(b) != declared + 2:
         return None
-
-    if hdr < 0xE0:
+    count = payload_bytes // 2
+    if b[3] + count > 256:
         return None
-    if coding not in (0x07, 0x47):
-        return None
-
-    declared_bytes = hdr - 0xE0
-    group_count = (declared_bytes - 3) // 2
-
-    payload = hexline[8:]
-    if len(payload) < group_count * 4:
-        return None
-
-    levels: Dict[int, Optional[int]] = {}
-    for i in range(group_count):
-        g = start_group + i
-        packed4 = payload[i * 4: (i + 1) * 4]
-        levels[g] = decode_status_packed4(packed4)
-
-    return StatusReply(
-        hdr=hdr, coding=coding, app=app, start_group=start_group, levels=levels, raw_hex=hexline
-    )
-
+    levels = {}
+    for i in range(count):
+        packed = b[4 + 2 * i:6 + 2 * i].hex().upper()
+        # Invalid/absent group encodings remain unknown, never fabricated OFF.
+        levels[b[3] + i] = decode_status_packed4(packed)
+    return StatusReply(hdr=b[0], coding=b[1], app=b[2], start_group=b[3],
+                       levels=levels, raw_hex=hexline)
