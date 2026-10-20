@@ -25,3 +25,6 @@ For explicit dimmer fade rates and stop-ramp commands (Release 6), see
 
 Release 7 adds configurable passive status monitoring; see
 [docs/PASSIVE-STATUS.md](docs/PASSIVE-STATUS.md) for the trial and its limits.
+
+Release 8 adds targeted numeric ramp readback; see
+[docs/RAMP-READBACK.md](docs/RAMP-READBACK.md) for rate limits and acceptance.

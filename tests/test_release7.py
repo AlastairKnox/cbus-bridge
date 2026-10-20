@@ -185,6 +185,7 @@ class MonitorConfigurationTests(unittest.TestCase):
 
     def test_monitor_intent_is_reported_and_passed_to_reader(self):
         client,cni,bridge = Mock(),Mock(),Mock()
+        bridge.ramps.snapshot.return_value = {}
         cni.failover_status.return_value = {}
         client.loop_start.side_effect = lambda:client.on_connect(client,None,{},0)
         class End(BaseException): pass

@@ -1,5 +1,9 @@
 # Explicit native dimmer ramps (Release 6)
 
+Release 8 optionally adds automatic numeric readback and state priority; see
+[RAMP-READBACK.md](RAMP-READBACK.md). The original Release 6 behavior below
+applies when that feature is disabled.
+
 Existing light ON/OFF, brightness sliders, numeric/comma payloads and fan presets
 keep their previous behavior. This addition is opt-in JSON on an existing,
 configured dimmer brightness command topic:

@@ -102,6 +102,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="Status diagnostics interval, minimum 1s; 0 disables (service default 5s).")
     ap.add_argument("--traffic-every", type=float, default=0,
                     help="Non-retained traffic-view interval, minimum 1s; 0 disables (service default 1s).")
+    ap.add_argument("--ramp-readback-every", type=float, default=0,
+                    help="Targeted dimmer readback: 0 disables, or 10..60s (service default 10s).")
     ap.add_argument("--traffic-topic", default="cbus/bridge/traffic")
     return ap
 
@@ -109,6 +111,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    if args.ramp_readback_every != 0 and not 10 <= args.ramp_readback_every <= 60:
+        parser.error("--ramp-readback-every must be 0 or between 10 and 60 seconds")
     if args.monitor and not args.init:
         parser.error("--monitor requires --init so interface options can be set")
     if args.readonly and args.enable_writes:
@@ -175,7 +179,7 @@ def main(argv=None) -> int:
 
     diagnostics = BridgeDiagnostics(profiles)
     bridge = CbusMqttBridge(cni=cni, mqtt_client=mc, profiles=profiles, readonly=readonly,
-                            diagnostics=diagnostics)
+                            diagnostics=diagnostics, ramp_readback_every=args.ramp_readback_every)
 
     worker = CommandWorker(diagnostics, cancel=bridge.cancel_session)
 
@@ -218,6 +222,7 @@ def main(argv=None) -> int:
             "cni_connection_age_s": int(time.monotonic() - metrics.last_cni_connect_mono) if cni_up.is_set() and metrics.last_cni_connect_mono is not None else None,
             "diagnostics": diagnostics.snapshot(),
             "command_queue": worker.snapshot(),
+            "ramp_tracking": bridge.ramps.snapshot(),
 
             "last_mqtt_connect_ts": metrics.last_mqtt_connect_ts,
             "last_mqtt_disconnect_ts": metrics.last_mqtt_disconnect_ts,
@@ -364,6 +369,7 @@ def main(argv=None) -> int:
         while not stop_event.wait(0.25):
             now = time.monotonic()
             try:
+                bridge.queue_ramp_readback(worker)
                 if status_interval and now >= next_status:
                     next_status = now + status_interval
                     if mqtt_up.is_set():
@@ -382,7 +388,7 @@ def main(argv=None) -> int:
                 set_last_error(f"Metrics publish failed: {e!r}")
                 LOG.warning("Metrics publish failed: %s", e)
 
-    if status_interval or args.traffic_every:
+    if status_interval or args.traffic_every or args.ramp_readback_every:
         threading.Thread(target=metrics_loop, name="cbus-metrics", daemon=True).start()
         LOG.info("Diagnostics intervals: status=%ss, traffic=%ss", status_interval, args.traffic_every)
 

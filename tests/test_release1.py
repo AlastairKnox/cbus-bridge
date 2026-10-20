@@ -66,6 +66,7 @@ class AvailabilityTests(unittest.TestCase):
         cni.failover_status.return_value = {}
         cni.active_port = 10001
         bridge = Mock()
+        bridge.ramps.snapshot.return_value = {}
         def read_loop(**kwargs):
             client.on_disconnect(client, None, 1)
             client.on_connect(client, None, {}, 0)

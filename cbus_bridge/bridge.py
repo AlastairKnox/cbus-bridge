@@ -14,6 +14,7 @@ from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_fra
 from .ha_profiles import GroupProfile
 from .utils import (
     BridgeDiagnostics,
+    RampTracker,
     CommandRejected,
     clamp,
     checksum_2s_complement,
@@ -63,6 +64,7 @@ class CbusMqttBridge:
         dimmer_ramp_cmd: int = 0x0A,  # ramp code
         ack_timeout_s: float = 2.5,
         diagnostics=None,
+        ramp_readback_every=0,
     ):
         self.diagnostics = diagnostics if diagnostics is not None else BridgeDiagnostics(profiles)
         self.cni = cni
@@ -101,6 +103,9 @@ class CbusMqttBridge:
         self._read_generation = 0
         self._state_publish_lock = threading.RLock()
         self._last_published_state = {}
+        self.ramps = RampTracker(self.diagnostics,
+            {(p.app,p.group) for p in profiles.values() if p.level_mode == 'pct'},
+            interval=0 if readonly else ramp_readback_every)
 
     def execute_queued(self, operation, lease):
         self._command_local.lease = lease
@@ -116,6 +121,7 @@ class CbusMqttBridge:
     def cancel_session(self):
         with self._state_publish_lock:
             self._last_published_state.clear()
+            self.ramps.reset()
         with self._pending_synthetic_lock:
             self._read_generation += 1
             timers = list(self._pending_synthetic_timers.values())
@@ -245,23 +251,65 @@ class CbusMqttBridge:
             self._last_published_state.pop(topic, None)
             return 'failed'
 
+    def _begin_ramp(self, app, group, cmd, level, *, observed=False):
+        rates = {v:k for k,v in RAMP_CODES.items()}
+        if cmd == 0x09:
+            target, seconds = None, None
+        elif cmd in rates:
+            target, seconds = level, rates[cmd]
+        elif cmd in (0x01,0x79):
+            target, seconds = (0 if cmd == 0x01 else 255), 0
+        else:
+            return None
+        with self._state_publish_lock:
+            return self.ramps.begin(app,group,target,seconds,observed=observed)
+
+    def queue_ramp_readback(self, worker):
+        if not self.ramps.enabled or not worker.snapshot()['ready']:
+            return
+        token = self.ramps.reserve()
+        if token is None:
+            return
+        def readback():
+            self._guarded(lambda:self.ramps.send(token,self._send_status_block))
+        if not worker.submit(lambda lease:self.execute_queued(readback,lease)):
+            self.ramps.release(token)
+            self.diagnostics.bump('ramp_readback_queue_rejections_total')
+
+    def _send_status_block(self, app, start):
+        if self.readonly:
+            return
+        frame = bytes([5,255,0,0x73,7,app,start])
+        payload = (frame+bytes([checksum_2s_complement(frame)])).hex().upper()
+        self.diagnostics.request(app,start)
+        try:
+            self.cni.send_hex_frame(payload)
+        except Exception:
+            self.diagnostics.bump('status_send_failures_total')
+            raise
+        self.diagnostics.tx('ramp_readback_request',app=app,start_group=start,hex=payload)
+
     def handle_binary_status(self, reply):
         self.diagnostics.binary_status(reply)
         for group, value in reply.states.items():
             if value not in ('on', 'off'):
                 continue  # absence/error must not fabricate an OFF or numeric level
-            self._cancel_pending_synthetic_level(reply.app, group)
-            for profile in self._profiles_by_app_group.get((reply.app, group), []):
-                if profile.level_state_topic == profile.state_topic:
-                    # Some existing templates derive state and brightness from a
-                    # single numeric topic. An ON/OFF string would corrupt both.
-                    self.diagnostics.bump('binary_shared_topic_skips_total')
+            self._cancel_pending_synthetic_level(reply.app,group)
+            with self._state_publish_lock:
+                if self.ramps.suppress_binary(reply.app,group):
+                    self.diagnostics.bump('ramp_binary_updates_suppressed_total')
                     continue
-                result = self.publish_state(profile, value == 'on', only_if_changed=True)
-                if result == 'published':
-                    self.diagnostics.binary_published(profile)
-                elif result == 'failed':
-                    self.diagnostics.bump('binary_state_publish_failures_total')
+                for profile in self._profiles_by_app_group.get((reply.app, group), []):
+                    if profile.level_state_topic == profile.state_topic:
+                        # Some existing templates derive state and brightness from a
+                        # single numeric topic. An ON/OFF string would corrupt both.
+                        self.diagnostics.bump('binary_shared_topic_skips_total')
+                        continue
+                    result = self.publish_state(profile, value == 'on', only_if_changed=True)
+                    if result == 'published':
+                        self.diagnostics.binary_published(profile)
+                    elif result == 'failed':
+                        self.diagnostics.bump('binary_state_publish_failures_total')
 
     def publish_level(self, p: GroupProfile, level255: int, *, source: str = "ACK") -> None:
         if source == 'ACK':
@@ -277,12 +325,21 @@ class CbusMqttBridge:
         fan mode: publish preset numeric level and state ON/OFF.
         none: publish state ON/OFF only.
         """
+        remember_nonzero = True
+        if p.level_mode == 'pct' and self.ramps.enabled:
+            if source == 'ACK' or (source != 'STATUS' and self.ramps.suppress_binary(p.app,p.group)):
+                return
+            if source == 'STATUS':
+                self.ramps.observe(p.app,p.group,level255)
+                remember_nonzero = self.ramps.remember_level(p.app,p.group,level255)
         level255 = clamp(int(level255), 0, 255)
         self.diagnostics.published(p, level255, source)
 
         if p.level_mode == "pct":
             pct = level255_to_pct(level255, p.pct_scale)
-            if pct > 0:
+            if self.ramps.enabled and source == 'STATUS' and level255 > 0:
+                pct = max(1,pct)  # nonzero raw status must not become a false OFF
+            if pct > 0 and remember_nonzero:
                 p.last_nonzero_255 = level255
             if p.level_state_topic:
                 self.mqtt.publish(self._topic_for(p, "level"), payload=str(pct), retain=True, qos=1)
@@ -417,14 +474,23 @@ class CbusMqttBridge:
             payload = b.hex().upper() + f"{cks:02X}" + tag
             self.diagnostics.bump("command_attempts_total")
             started = time.monotonic()
+            watch = None
+            def send_command():
+                nonlocal watch
+                watch = self._begin_ramp(app_byte,group,cmd,level)
+                if watch is not None:
+                    self._cancel_pending_synthetic_level(app_byte,group)
+                self.cni.send_hex_frame(payload)
             try:
-                self._guarded(lambda: self.cni.send_hex_frame(payload))
+                self._guarded(send_command)
                 self.diagnostics.tx("lighting_command", app=app_byte, group=group, command=cmd,
                                     level=level, tag=tag, hex=payload[:-1])
                 got, res = self._await_ack(tag, waiter)
             except CommandRejected:
+                self.ramps.ack(watch,False)
                 raise
             except Exception:
+                self.ramps.ack(watch,False)
                 self.diagnostics.bump("command_send_failures_total")
                 self.diagnostics.event("command_result", "LOCAL", result="send_failure", tag=tag)
                 raise
@@ -434,6 +500,7 @@ class CbusMqttBridge:
                     self._ack_waiters.pop(tag, None)
 
         if res == 'cancelled':
+            self.ramps.ack(watch,False)
             raise CommandRejected('session_changed')
         self._guarded(lambda: None, expire=False)
         outcome = "timeout" if not got else {".": "success", "#": "retries_exhausted", "$": "corruption", "%": "clock_loss", "!": "bang"}.get(res, "unknown")
@@ -444,6 +511,7 @@ class CbusMqttBridge:
         self.diagnostics.event("command_result", "LOCAL", app=app_byte, group=group, tag=tag,
                                result=outcome, elapsed_ms=round((time.monotonic() - started) * 1000, 1))
         if not got:
+            self.ramps.ack(watch,False)
             lease = getattr(self._command_local, 'lease', None)
             if lease is not None:
                 lease.invalidate()  # discard queue and close socket before tag reuse
@@ -453,6 +521,7 @@ class CbusMqttBridge:
             )
             return False
 
+        self.ramps.ack(watch, got and res == ".")
         if res == ".":
             LOG.info(
                 "CNI ACK %s. (success) cmd=0x%02X group=%d level=%s%s",
@@ -801,6 +870,12 @@ class CbusMqttBridge:
                 self.diagnostics.observed(sal.app, sal.group)
                 self.diagnostics.event("lighting", "RX", app=sal.app, group=sal.group,
                                        unit=sal.dev, command=sal.cmd, level=sal.level)
+                if self.ramps.enabled and self._has_pct_profile(sal.app,sal.group):
+                    self._begin_ramp(sal.app,sal.group,sal.cmd,sal.level,observed=True)
+                    self._cancel_pending_synthetic_level(sal.app,sal.group)
+                    if sal.cmd == 0x09:
+                        self.diagnostics.bump('transition_stops_observed_total')
+                    continue
                 if sal.cmd == 0x09:
                     self._cancel_pending_synthetic_level(sal.app, sal.group)
                     self.diagnostics.bump('transition_stops_observed_total')

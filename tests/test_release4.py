@@ -196,6 +196,7 @@ class SchedulerTests(unittest.TestCase):
         mqtt_up, cni_up = threading.Event(), threading.Event()
         stop = Mock(); stop.wait.side_effect = [False, True]
         client, cni, bridge = Mock(), Mock(), Mock()
+        bridge.ramps.snapshot.return_value = {}
         client.publish.return_value.rc = 0
         cni.failover_status.return_value = {}
         client.loop_start.side_effect = lambda: client.on_connect(client, None, {}, 0)

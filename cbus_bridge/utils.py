@@ -498,3 +498,180 @@ def parse_transition_payload(text, scale):
     if type(seconds) is not int or seconds not in RAMP_CODES:
         raise ValueError('Unsupported full-scale ramp rate')
     return 'ramp', level, seconds
+
+
+class RampTracker:
+    """Session-local watches bounded by configured dimmers and a bus budget."""
+    def __init__(self, diagnostics, keys, interval=0, clock=None):
+        import threading
+        import time
+        self.lock = threading.RLock()
+        self.diagnostics, self.keys = diagnostics, set(keys)
+        self.interval, self.clock = interval, clock or time.monotonic
+        self.entries = {}
+        self.numeric_authority = set()
+        self.epoch = self.version = 0
+        self.pending = None
+        self.next_bus = 0.
+        self.last_sent = float("-inf")
+
+    @property
+    def enabled(self):
+        return self.interval > 0
+
+    def _finish(self, key, result):
+        entry = self.entries.pop(key)
+        self.diagnostics.bump('ramp_tracking_' + result + '_total')
+        self.diagnostics.event('ramp_readback_' + result, 'LOCAL', app=key[0], group=key[1],
+                               level=entry['last_level'])
+
+    def reset(self):
+        with self.lock:
+            self.diagnostics.bump('ramp_tracking_disconnect_cancellations_total', len(self.entries))
+            self.epoch += 1
+            self.entries.clear()
+            self.numeric_authority.clear()
+            self.pending = None
+            self.next_bus = self.clock()
+            self.last_sent = float("-inf")
+
+    def begin(self, app, group, target, seconds, *, observed=False):
+        key = (app, group)
+        with self.lock:
+            if not self.enabled or key not in self.keys:
+                return None
+            now, old = self.clock(), self.entries.get(key)
+            # Do not restart a locally initiated command when its SAL is echoed.
+            if observed and old and old['target'] == target and old['seconds'] == seconds and now-old['started'] < 2:
+                old['observed'] = old['ready'] = True
+                return None
+            self.version += 1
+            self.entries[key] = {
+                'version': self.version, 'target': target, 'seconds': seconds,
+                'started': now, 'deadline': now+max(90,(seconds or 0)+30),
+                'due': now+1, 'ready': observed, 'observed': observed, 'waiting': None, 'misses': 0,
+                'last_level': None, 'confirmations': 0, 'phase': 'stop' if target is None else 'ramp',
+            }
+            self.diagnostics.bump('ramp_tracking_started_total')
+            return self.epoch, key, self.version, old
+
+    def ack(self, token, success):
+        if token is None:
+            return
+        epoch, key, version, old = token
+        with self.lock:
+            entry = self.entries.get(key)
+            if epoch != self.epoch or not entry or entry['version'] != version:
+                return
+            if success or entry['observed']:
+                entry['ready'] = True
+            elif old is not None:
+                self.entries[key] = old
+            else:
+                self.entries.pop(key)
+
+    def suppress_binary(self, app, group):
+        with self.lock:
+            return (app,group) in self.entries or (app,group) in self.numeric_authority
+
+    def remember_level(self, app, group, level):
+        with self.lock:
+            entry = self.entries.get((app,group))
+            # Intermediate fading samples must not replace the remembered ON
+            # brightness. A reached positive target or a confirmed stop can.
+            return entry is None or (entry['target'] is not None and level == entry['target'] and level > 0)
+
+    def observe(self, app, group, level):
+        with self.lock:
+            now = self.clock()
+            key = (app, group)
+            if not self.enabled or key not in self.keys:
+                return
+            self.numeric_authority.add(key)
+            entry = self.entries.get(key)
+            if not entry or entry['waiting'] is None or now-entry['waiting'] > 3:
+                return
+            # Only requests sent for this command generation advance completion.
+            entry['waiting'] = None
+            entry['misses'] = 0
+            self.diagnostics.bump('ramp_readback_samples_total')
+            last, entry['last_level'] = entry['last_level'], level
+            matched = last is not None and level == last if entry['target'] is None else level == entry['target']
+            entry['confirmations'] = entry['confirmations']+1 if matched else (1 if entry['target'] is None else 0)
+            if entry['confirmations'] >= 2:
+                self._finish(key, 'completed')
+            elif entry['target'] is None or entry['confirmations']:
+                entry['due'] = now+1
+            else:
+                remaining = entry['seconds'] * abs(entry['target']-level) / 255
+                entry['due'] = now+min(self.interval,max(1,remaining+1))
+
+    def reserve(self):
+        with self.lock:
+            now = self.clock()
+            for key, entry in list(self.entries.items()):
+                if now >= entry['deadline']:
+                    self._finish(key, 'expired')
+                    continue
+                if entry['waiting'] is not None and now-entry['waiting'] >= 3:
+                    entry['waiting'] = None
+                    entry['misses'] += 1
+                    self.diagnostics.bump('ramp_readback_reply_timeouts_total')
+                    if entry['misses'] >= 3:
+                        # No endless retry loop; retain protection until deadline.
+                        entry['phase'] = 'readback_failed'
+                        self.diagnostics.bump('ramp_readback_failed_total')
+            if self.pending is not None:
+                if now < self.pending['expires']:
+                    return None
+                self.pending = None
+                self.diagnostics.bump('ramp_readback_queue_expired_total')
+            if now < self.next_bus:
+                return None
+            due = [(key,e) for key,e in self.entries.items() if e['ready']
+                   and e['phase'] != 'readback_failed' and e['waiting'] is None and now >= e['due']]
+            if not due:
+                return None
+            key, _ = min(due,key=lambda item:item[1]['due'])
+            block = key[0],key[1]//32*32
+            versions = {k:e['version'] for k,e in self.entries.items()
+                        if (k[0],k[1]//32*32) == block and e['ready'] and e['phase'] != 'readback_failed'}
+            self.pending = {'epoch':self.epoch,'block':block,'versions':versions,'expires':now+6}
+            self.next_bus = now+5  # global ceiling: one block per five seconds
+            return self.pending
+
+    def release(self, token):
+        with self.lock:
+            if self.pending is token:
+                self.pending = None
+
+    def send(self, token, operation):
+        with self.lock:
+            now = self.clock()
+            if self.pending is not token or token['epoch'] != self.epoch or now >= token['expires']:
+                return False
+            self.pending = None
+            if now < self.last_sent+5:
+                self.next_bus = max(self.next_bus,self.last_sent+5)
+                return False
+            matching = [self.entries[k] for k,v in token['versions'].items()
+                        if k in self.entries and self.entries[k]['version'] == v
+                        and self.entries[k]['phase'] != 'readback_failed' and now < self.entries[k]['deadline']]
+            if not matching:
+                return False
+            for entry in matching:
+                entry['waiting'],entry['due'] = now,now+self.interval
+            self.last_sent = now
+            operation(*token['block'])
+            self.diagnostics.bump('ramp_readback_requests_total')
+            return True
+
+    def snapshot(self):
+        with self.lock:
+            now = self.clock()
+            return {'enabled':self.enabled,'interval_s':self.interval,'global_min_interval_s':5,
+                    'active_groups':len(self.entries),'numeric_authority_groups':len(self.numeric_authority),
+                    'groups':[{'app':key[0],'group':key[1],'target_level':e['target'],
+                               'full_scale_seconds':e['seconds'],'phase':e['phase'],
+                               'age_s':round(now-e['started'],1),'last_reported_level':e['last_level'],
+                               'missing_replies':e['misses']} for key,e in self.entries.items()]}
