@@ -658,7 +658,7 @@ class RampTracker:
             versions = {k:e['version'] for k,e in self.entries.items()
                         if (k[0],k[1]//32*32) == block and e['ready'] and e['phase'] != 'readback_failed'}
             self.pending = {'epoch':self.epoch,'block':block,'versions':versions,'expires':now+6}
-            self.next_bus = now+5  # global ceiling: one block per five seconds
+            self.next_bus = now+3  # global ceiling: one block per three seconds
             return self.pending
 
     def release(self, token):
@@ -672,8 +672,8 @@ class RampTracker:
             if self.pending is not token or token['epoch'] != self.epoch or now >= token['expires']:
                 return False
             self.pending = None
-            if now < self.last_sent+5:
-                self.next_bus = max(self.next_bus,self.last_sent+5)
+            if now < self.last_sent+3:
+                self.next_bus = max(self.next_bus,self.last_sent+3)
                 return False
             matching = [self.entries[k] for k,v in token['versions'].items()
                         if k in self.entries and self.entries[k]['version'] == v
@@ -690,7 +690,7 @@ class RampTracker:
     def snapshot(self):
         with self.lock:
             now = self.clock()
-            return {'enabled':self.enabled,'interval_s':self.interval,'global_min_interval_s':5,
+            return {'enabled':self.enabled,'interval_s':self.interval,'global_min_interval_s':3,
                     'active_groups':len(self.entries),'numeric_authority_groups':len(self.numeric_authority),
                     'groups':[{'app':key[0],'group':key[1],'target_level':e['target'],
                                'full_scale_seconds':e['seconds'],'phase':e['phase'],

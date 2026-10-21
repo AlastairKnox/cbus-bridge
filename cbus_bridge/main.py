@@ -103,7 +103,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--traffic-every", type=float, default=0,
                     help="Non-retained traffic-view interval, minimum 1s; 0 disables (service default 1s).")
     ap.add_argument("--ramp-readback-every", type=float, default=0,
-                    help="Targeted dimmer readback: 0 disables, or 10..60s (service default 10s).")
+                    help="Targeted dimmer readback: 0 disables, or 3..60s (service default 3s).")
     ap.add_argument("--traffic-topic", default="cbus/bridge/traffic")
     return ap
 
@@ -111,8 +111,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
-    if args.ramp_readback_every != 0 and not 10 <= args.ramp_readback_every <= 60:
-        parser.error("--ramp-readback-every must be 0 or between 10 and 60 seconds")
+    if args.ramp_readback_every != 0 and not 3 <= args.ramp_readback_every <= 60:
+        parser.error("--ramp-readback-every must be 0 or between 3 and 60 seconds")
     if args.monitor and not args.init:
         parser.error("--monitor requires --init so interface options can be set")
     if args.readonly and args.enable_writes:

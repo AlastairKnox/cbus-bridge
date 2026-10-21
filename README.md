@@ -33,3 +33,6 @@ Release 8 adds targeted numeric ramp readback; see
 Release 10 improves interface reply classification, live traffic readability and
 current-session numeric coverage; see [release notes](releases/RELEASE-10.md) and
 [optional HA updates](docs/RELEASE-10-HA.md).
+
+Release 11 changes service ramp readback to three seconds, globally limited to one
+automatic block request per three seconds. See [release notes](releases/RELEASE-11.md).

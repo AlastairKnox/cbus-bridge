@@ -102,8 +102,8 @@ class TrackerTests(unittest.TestCase):
         self.now=5.5;self.assertTrue(self.t.send(first,Mock()))
         self.now=6;second=self.t.reserve();self.assertIsNotNone(second)
         action=Mock();self.assertFalse(self.t.send(second,action));action.assert_not_called()
-        self.now=10.5;self.assertIsNone(self.t.reserve())
-        self.now=11;self.assertIsNotNone(self.t.reserve())
+        self.now=8.99;self.assertIsNone(self.t.reserve())
+        self.now=9;self.assertIsNotNone(self.t.reserve())
 
     def test_abandoned_reservation_expires_without_sending_stale_work(self):
         self.begin();self.now=1;token=self.t.reserve()
@@ -233,7 +233,7 @@ class RampBridgeTests(unittest.TestCase):
         self.begin(b);timer.cancel.assert_called_once()
 
     def test_cli_interval_rejects_unsafe_values_before_opening_connections(self):
-        for value in ('1','9','61','nan','inf','-1'):
+        for value in ('1','2','61','nan','inf','-1'):
             with patch.object(app.mqtt,'Client') as client,self.assertRaises(SystemExit):
                 app.main(['--cni-host','unused','--ha-config','unused','--ramp-readback-every',value])
             client.assert_not_called()
@@ -275,7 +275,7 @@ class RampBridgeTests(unittest.TestCase):
              patch.object(app.threading,'Thread',side_effect=thread), \
              patch.object(app.threading,'Event',side_effect=[mqtt_up,cni_up,stop]):
             with self.assertRaises(End):
-                app.main(['--cni-host','unused','--ha-config','unused','--ramp-readback-every','10'])
+                app.main(['--cni-host','unused','--ha-config','unused','--ramp-readback-every','3'])
         self.assertIn('cbus-metrics',targets)
         # The same scheduler drives readback even with every publish interval off.
         targets['cbus-metrics']()

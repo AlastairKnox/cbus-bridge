@@ -30,4 +30,4 @@ exec python /opt/cbus_bridge/run_bridge.py \
   --metrics-every "${METRICS_EVERY}" \
   --diagnostics-every "${DIAGNOSTICS_EVERY:-5}" \
   --traffic-every "${TRAFFIC_EVERY:-1}" \
-  --ramp-readback-every "${RAMP_READBACK_EVERY:-10}"
+  --ramp-readback-every "${RAMP_READBACK_EVERY:-3}"

@@ -14,18 +14,21 @@ separate readbacks. These are reported network group values, not independent
 light-output measurements. Release 8 uses the numeric evidence to update HA and
 protects it from conflicting binary state during a known ramp.
 
+Release 11 shortens normal polling and the global automatic minimum to three
+seconds. Explicit environment overrides are preserved.
+
 ## Configuration
 
-The service defaults `RAMP_READBACK_EVERY` to 10 seconds. Set it to `0` to disable
+The service defaults `RAMP_READBACK_EVERY` to 3 seconds. Set it to `0` to disable
 tracking and recover Release 7's dimmer publication behavior. CLI runs default to
-`--ramp-readback-every 0`; supported enabled values are 10–60 seconds. Read-only
+`--ramp-readback-every 0`; supported enabled values are 3–60 seconds. Read-only
 mode disables tracking/transmissions regardless of that setting. MONITOR remains
 configured as before and retains its own CNI_MONITOR opt-out.
 
 The feature adds bus traffic only while known configured percentage dimmers have
-active watches. Normal readbacks are scheduled about every ten seconds by default.
+active watches. Normal readbacks are scheduled about every three seconds by default.
 Initial/final/stop confirmation can be sooner, subject to a global ceiling of one
-automatic targeted block request per five seconds across all watches. A hardware
+automatic targeted block request per three seconds across all watches. A hardware
 status block contains 32 groups. Active dimmers in the same block share a request;
 only affected blocks are selected, never a full resync for tracking. Existing
 manual/startup/periodic resyncs are unchanged and are outside this automatic budget.
