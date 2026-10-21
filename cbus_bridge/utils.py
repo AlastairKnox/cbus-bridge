@@ -212,6 +212,17 @@ class BridgeDiagnostics:
         self.event('transition_stop_transmitted' if stopped else 'transition_transmitted', 'LOCAL',
                    app=profile.app, group=profile.group, level=target, full_scale_seconds=seconds)
 
+    def duration_transmitted(self, profile, start, target, requested, rate, nominal):
+        with self.lock:
+            row = self.groups.get(f'{profile.net}/{profile.app}/{profile.group}')
+            if row is not None and 'last_transition' in row:
+                row['last_transition'].update(requested_duration_s=requested,
+                    start_reported_level=start,nominal_duration_s=round(nominal,3))
+        self.bump('duration_transitions_transmitted_total')
+        self.event('duration_transition_selected','LOCAL',app=profile.app,group=profile.group,
+            requested_seconds=requested,start_level=start,target_level=target,
+            full_scale_seconds=rate,nominal_duration_s=round(nominal,3))
+
     def request(self, app, start):
         with self.lock:
             self.counters['status_requests_total'] += 1
@@ -511,6 +522,19 @@ def parse_transition_payload(text, scale):
         raise ValueError('Transition must be an object')
     if set(obj) == {'stop'} and obj['stop'] is True:
         return 'stop', None, None
+    if set(obj) in ({'level', 'transition_seconds'}, {'restore', 'transition_seconds'}):
+        import math
+        seconds = obj['transition_seconds']
+        if type(seconds) not in (int, float) or not math.isfinite(seconds) or not 0 <= seconds <= 3600:
+            raise ValueError('Duration must be finite and within 0..3600 seconds')
+        if 'restore' in obj:
+            if obj['restore'] is not True:
+                raise ValueError('restore must be true')
+            return 'duration_restore', None, seconds
+        level = obj['level']
+        if type(level) is not int or not 0 <= level <= scale:
+            raise ValueError('Transition level outside profile brightness scale')
+        return 'duration', level, seconds
     if set(obj) != {'level', 'ramp_seconds'}:
         raise ValueError('Expected level and ramp_seconds, or stop=true')
     level, seconds = obj['level'], obj['ramp_seconds']
@@ -519,6 +543,16 @@ def parse_transition_payload(text, scale):
     if type(seconds) is not int or seconds not in RAMP_CODES:
         raise ValueError('Unsupported full-scale ramp rate')
     return 'ramp', level, seconds
+
+
+def nearest_duration_rate(start, target, seconds):
+    """Minimize nominal partial-travel duration error; ties prefer faster rate."""
+    from .cni_protocol import RAMP_SECONDS
+    fraction = abs(target-start)/255
+    if not fraction or not seconds:
+        return 0, 0.
+    rate = min(RAMP_SECONDS, key=lambda rate: (abs(rate*fraction-seconds), rate))
+    return rate, rate*fraction
 
 
 class RampTracker:
@@ -685,6 +719,20 @@ class RampTracker:
             self.last_sent = now
             operation(*token['block'])
             self.diagnostics.bump('ramp_readback_requests_total')
+            return True
+
+    def send_duration_probe(self, app, start, operation):
+        # The command worker serializes probes with lighting commands. Supersede
+        # an unsent background reservation rather than wait behind our own queue.
+        with self.lock:
+            now = self.clock()
+            if now < self.last_sent+3:
+                return False
+            self.pending = None
+            self.next_bus = now+3
+            self.last_sent = now
+            operation(app,start)
+            self.diagnostics.bump('duration_level_requests_total')
             return True
 
     def snapshot(self):

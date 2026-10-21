@@ -1,0 +1,28 @@
+# Proposal: replace only the existing Study MQTT light entry after bridge deployment.
+# Do not add this as a second light, or use this HA-only schema as the bridge profile file.
+mqtt:
+  light:
+    - name: study_lights
+      unique_id: study_lights_001
+      default_entity_id: light.study_lights
+      schema: template
+      availability_topic: cbus/bridge/availability
+      payload_available: online
+      payload_not_available: offline
+      command_topic: cbus/write/254/56/13/ramp
+      command_on_template: >-
+        {% if brightness is defined %}
+        {% set percent = (brightness * 100 / 255) | round(0) | int %}
+        {"level": {{ [1, percent] | max if brightness > 0 else 0 }},
+         "transition_seconds": {{ transition | default(0) }}}
+        {% else %}
+        {"restore": true, "transition_seconds": {{ transition | default(0) }}}
+        {% endif %}
+      command_off_template: >-
+        {"level": 0, "transition_seconds": {{ transition | default(0) }}}
+      state_topic: cbus/read/254/56/13/level
+      state_template: "{{ 'on' if value | float > 0 else 'off' }}"
+      brightness_template: "{{ (value | float * 255 / 100) | round(0) | int }}"
+      optimistic: false
+      qos: 0
+      retain: false

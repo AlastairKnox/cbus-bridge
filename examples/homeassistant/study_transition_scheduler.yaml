@@ -1,0 +1,31 @@
+# Merge only this customize entry into an existing scheduler-card configuration.
+# Requires the Study HA template light and bridge Release 12 first.
+customize:
+  light.study_lights:
+    actions:
+      - service: turn_on
+        name: Set brightness with transition
+        icon: mdi:lightbulb-on
+        variables:
+          brightness_pct:
+            name: Brightness
+            unit: '%'
+            min: 1
+            max: 100
+            step: 1
+          transition:
+            name: Transition duration
+            unit: s
+            min: 0
+            max: 3600
+            step: 1
+      - service: turn_off
+        name: Fade off
+        icon: mdi:lightbulb-off
+        variables:
+          transition:
+            name: Transition duration
+            unit: s
+            min: 0
+            max: 3600
+            step: 1

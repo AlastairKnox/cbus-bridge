@@ -22,6 +22,7 @@ from .utils import (
     normalize_hex_from_bytes,
     parse_first_int,
     parse_transition_payload,
+    nearest_duration_rate,
     pct_to_level255,
     quantize_fan_level,
 )
@@ -71,6 +72,9 @@ class CbusMqttBridge:
         self.mqtt = mqtt_client
         self.profiles = profiles
         self.readonly = readonly
+        self._duration_level = None
+        self._duration_level_event = threading.Event()
+        self._duration_session = 0
         self._pending_setup = {}
         self.dimmer_ramp_cmd = dimmer_ramp_cmd
         self.ack_timeout_s = float(ack_timeout_s)
@@ -120,6 +124,9 @@ class CbusMqttBridge:
         return lease.atomic(operation, expire=expire) if lease is not None else operation()
 
     def cancel_session(self):
+        self._duration_session += 1
+        self._duration_level = None
+        self._duration_level_event.set()
         self._pending_setup = {}
         with self._state_publish_lock:
             self._last_published_state.clear()
@@ -327,6 +334,9 @@ class CbusMqttBridge:
         fan mode: publish preset numeric level and state ON/OFF.
         none: publish state ON/OFF only.
         """
+        if source == 'STATUS' and (p.net,p.app,p.group) == (254,56,13):
+            self._duration_level = int(level255)
+            self._duration_level_event.set()
         remember_nonzero = True
         if p.level_mode == 'pct' and self.ramps.enabled:
             if source == 'ACK' or (source != 'STATUS' and self.ramps.suppress_binary(p.app,p.group)):
@@ -546,6 +556,39 @@ class CbusMqttBridge:
     def write_ramp_to_level(self, app_byte: int, group: int, level255: int, ramp_cmd: int) -> bool:
         return self._send_lighting_command(app_byte=app_byte, cmd=ramp_cmd, group=group, level=level255)
 
+    def _duration_start_level(self, profile):
+        # Never use a remembered ON value or old HA state to calculate a duration.
+        # This runs on the existing command worker; the independent reader delivers
+        # the numeric reply. Lease guards prevent sends after queue/session expiry.
+        deadline = time.monotonic()+4
+        session = self._duration_session
+        self._duration_level = None
+        self._duration_level_event.clear()
+        while time.monotonic() < deadline:
+            if session != self._duration_session:
+                return None
+            def probe(app, start):
+                self._duration_level = None
+                self._duration_level_event.clear()
+                self._send_status_block(app,start)
+            sent = self._guarded(lambda:self.ramps.send_duration_probe(
+                profile.app,profile.group//32*32,probe))
+            if sent:
+                break
+            self._duration_level_event.wait(.05)
+            self._duration_level_event.clear()
+        else:
+            return None
+        # The send callback cleared any sample received while waiting for budget.
+        # No transaction IDs exist: a coincident valid unsolicited numeric report
+        # is also acceptable fresh network evidence, as with ordinary readback.
+        remaining = min(3,max(0,deadline-time.monotonic()))
+        self._duration_level_event.wait(remaining)
+        if session != self._duration_session:
+            return None
+        self._guarded(lambda:None)
+        return self._duration_level
+
     def _handle_transition(self, profile, text):
         if profile.level_mode != 'pct' or not profile.level_command_topic:
             self.diagnostics.bump('transition_rejected_total')
@@ -556,6 +599,25 @@ class CbusMqttBridge:
             self.diagnostics.bump('transition_rejected_total')
             LOG.warning('Rejected invalid dimmer transition')
             return
+        duration = action in ('duration','duration_restore')
+        start_level = nominal_duration = None
+        requested_seconds = seconds
+        if duration:
+            if self.readonly or (profile.net,profile.app,profile.group) != (254,56,13) or not self.ramps.enabled:
+                self.diagnostics.bump('transition_rejected_total')
+                return
+            target = (profile.last_nonzero_255 if profile.last_nonzero_255 > 0 else 255) if action == 'duration_restore' else pct_to_level255(level,profile.pct_scale)
+            if seconds:
+                start_level = self._duration_start_level(profile)
+                if start_level is None:
+                    self.diagnostics.bump('duration_level_unavailable_total')
+                    self.diagnostics.event('duration_transition_rejected','LOCAL',group=profile.group,
+                                           result='fresh_level_unavailable')
+                    LOG.warning('Duration transition rejected: no fresh level available for group=%d',profile.group)
+                    return
+                seconds, nominal_duration = nearest_duration_rate(start_level,target,seconds)
+            else:
+                seconds, nominal_duration = 0, 0.
         self.diagnostics.bump('transition_requests_total')
         if action == 'stop':
             # Stop carries no level. Never invent the stopped brightness.
@@ -563,13 +625,19 @@ class CbusMqttBridge:
                                               group=profile.group, level=None)
             target = None
         else:
-            target = pct_to_level255(level, profile.pct_scale)
+            if not duration:
+                target = pct_to_level255(level, profile.pct_scale)
             # Even target zero must use RAMP, rather than immediate OFF.
             ok = self.write_ramp_to_level(profile.app, profile.group, target, RAMP_CODES[seconds])
         if ok:
             def record():
                 self._cancel_pending_synthetic_level(profile.app, profile.group)
                 self.diagnostics.transition_transmitted(profile, target, seconds, stopped=action == 'stop')
+                if duration:
+                    self.diagnostics.duration_transmitted(profile,start_level,target,
+                        requested_seconds,seconds,nominal_duration)
+                    LOG.info('Duration transition group=%d target=%d requested=%ss full_scale=%ss nominal=%.3fs',
+                             profile.group,target,requested_seconds,seconds,nominal_duration)
             self._guarded(record, expire=False)
             # These opt-in commands do not publish a target as current brightness,
             # even at rate zero: only subsequent monitored/status traffic does.

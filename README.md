@@ -36,3 +36,7 @@ current-session numeric coverage; see [release notes](releases/RELEASE-10.md) an
 
 Release 11 changes service ramp readback to three seconds, globally limited to one
 automatic block request per three seconds. See [release notes](releases/RELEASE-11.md).
+
+Release 12 prepares a Study-only HA transition-duration trial; see
+[HA transitions](docs/HA-TRANSITIONS.md) for the optional HA definition, scheduling
+and rollback. The bridge installer does not activate the HA proposals.
