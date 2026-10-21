@@ -466,6 +466,175 @@ mqtt:
     default_entity_id: sensor.cbus_diag_binary_shared_skips
     value_template: "{{ value_json.diagnostics.counters.get('binary_shared_topic_skips_total', 0) }}"
     state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Active ramp watches
+    unique_id: cbus_diag_active_ramps
+    default_entity_id: sensor.cbus_diag_active_ramps
+    value_template: '{{ value_json.ramp_tracking.active_groups }}'
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Groups with numeric reports this connection
+    unique_id: cbus_diag_session_level_confirmed
+    default_entity_id: sensor.cbus_diag_session_level_confirmed
+    value_template: '{{ value_json.diagnostics.session_level_reported_groups | default(''unknown'') }}'
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Groups without numeric reports this connection
+    unique_id: cbus_diag_session_level_unconfirmed
+    default_entity_id: sensor.cbus_diag_session_level_unconfirmed
+    value_template: '{{ value_json.diagnostics.session_level_unconfirmed_groups | default(''unknown'') }}'
+    state_class: measurement
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Interface setup replies
+    unique_id: cbus_diag_setup_replies
+    default_entity_id: sensor.cbus_diag_setup_replies
+    value_template: '{{ value_json.diagnostics.counters.get(''interface_setup_replies_total'', 0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Ramp readback requests
+    unique_id: cbus_diag_ramp_readbacks
+    default_entity_id: sensor.cbus_diag_ramp_readbacks
+    value_template: '{{ value_json.diagnostics.counters.get(''ramp_readback_requests_total'', 0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Ramp readbacks without usable replies
+    unique_id: cbus_diag_ramp_missing_replies
+    default_entity_id: sensor.cbus_diag_ramp_missing_replies
+    value_template: '{{ value_json.diagnostics.counters.get(''ramp_readback_reply_timeouts_total'', 0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Ramp watches with repeated missing replies
+    unique_id: cbus_diag_ramp_readback_failures
+    default_entity_id: sensor.cbus_diag_ramp_readback_failures
+    value_template: '{{ value_json.diagnostics.counters.get(''ramp_readback_failed_total'', 0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Completed ramp watches
+    unique_id: cbus_diag_ramp_completed
+    default_entity_id: sensor.cbus_diag_ramp_completed
+    value_template: '{{ value_json.diagnostics.counters.get(''ramp_tracking_completed_total'', 0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Expired ramp watches
+    unique_id: cbus_diag_ramp_expired
+    default_entity_id: sensor.cbus_diag_ramp_expired
+    value_template: '{{ value_json.diagnostics.counters.get(''ramp_tracking_expired_total'', 0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Ramp readback queue rejections
+    unique_id: cbus_diag_ramp_queue_rejections
+    default_entity_id: sensor.cbus_diag_ramp_queue_rejections
+    value_template: '{{ value_json.diagnostics.counters.get(''ramp_readback_queue_rejections_total'', 0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Expired queued readbacks
+    unique_id: cbus_diag_ramp_queue_expired
+    default_entity_id: sensor.cbus_diag_ramp_queue_expired
+    value_template: '{{ value_json.diagnostics.counters.get(''ramp_readback_queue_expired_total'', 0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Binary updates deferred to numeric evidence
+    unique_id: cbus_diag_ramp_binary_suppressed
+    default_entity_id: sensor.cbus_diag_ramp_binary_suppressed
+    value_template: '{{ value_json.diagnostics.counters.get(''ramp_binary_updates_suppressed_total'', 0) }}'
+    state_class: total_increasing
+  - state_topic: cbus/bridge/status/diagnostics
+    availability_topic: cbus/bridge/availability
+    expire_after: 30
+    entity_category: diagnostic
+    device:
+      identifiers:
+      - cbus_bridge_diagnostics
+      name: C-Bus Bridge Diagnostics
+    name: Routine events omitted from activity view
+    unique_id: cbus_diag_routine_events
+    default_entity_id: sensor.cbus_diag_routine_events
+    value_template: '{{ value_json.diagnostics.counters.get(''traffic_routine_events_total'', 0) }}'
+    state_class: total_increasing
 recorder:
   exclude:
     entities:

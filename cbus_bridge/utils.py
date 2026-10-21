@@ -108,6 +108,7 @@ class BridgeDiagnostics:
         self.counters = Counter()
         self.unsupported_samples = {}
         self.recent = deque(maxlen=20)
+        self.activity = deque(maxlen=20)
         self.buckets = deque(maxlen=61)
         self.tx_buckets = deque(maxlen=61)
         self.error_buckets = deque(maxlen=301)
@@ -128,6 +129,8 @@ class BridgeDiagnostics:
             'pending_since': None, 'status_quality': 'not_requested',
             'binary_status': 'not_observed', 'last_binary_status_ts': None,
             'last_binary_status_mono': None, 'last_binary_publish_ts': None,
+            'level_mode': p.level_mode, 'level_report_ts': None, 'level_report_mono': None,
+            'session_level_seen': False,
             'profile_kind': 'writable' if p.command_topic else 'read_only',
         } for p in profiles.values()}
 
@@ -148,6 +151,15 @@ class BridgeDiagnostics:
             event = {'seq': self.sequence, 'ts': round(self.wall(), 3),
                      'kind': kind, 'direction': direction, **details}
             self.recent.append(event)
+            routine = kind in {'binary_status_frame', 'binary_status_report', 'ack', 'echo', 'interface_setup_reply'}
+            if kind == 'ack' and details.get('code') != '.':
+                routine = False
+            if kind == 'binary_status_report' and details.get('error', 0):
+                routine = False
+            if routine:
+                self.counters['traffic_routine_events_total'] += 1
+            else:
+                self.activity.append(event)
 
     def rx(self):
         with self.lock:
@@ -223,6 +235,9 @@ class BridgeDiagnostics:
                         # corrupt encoding. Keep those distinct from no response.
                         state['pending_since'] = None
                         if level is not None:
+                            state['level_report_ts'] = int(self.wall())
+                            state['level_report_mono'] = self.clock()
+                            state['session_level_seen'] = True
                             state['last_bus_ts'] = int(self.wall())
                             state['last_bus_mono'] = self.clock()
 
@@ -260,6 +275,7 @@ class BridgeDiagnostics:
             for state in self.groups.values():
                 state['pending_since'] = None
                 state['status_quality'] = 'not_requested'
+                state['session_level_seen'] = False
 
     def snapshot(self):
         with self.lock:
@@ -282,6 +298,8 @@ class BridgeDiagnostics:
                     'last_binary_report_age_s': None if self.last_binary_report_mono is None else round(now - self.last_binary_report_mono, 1),
                     'binary_error_configured_groups': sum(s['binary_status'] == 'error' for s in self.groups.values()),
                     'binary_absent_configured_groups': sum(s['binary_status'] == 'absent' for s in self.groups.values()),
+                    'session_level_reported_groups': sum(s['session_level_seen'] for s in self.groups.values()),
+                    'session_level_unconfirmed_groups': sum(not s['session_level_seen'] for s in self.groups.values()),
                     'configured_groups': len(self.groups), 'status_pending_groups': len(pending),
                     'status_overdue_groups': sum(now - s['pending_since'] >= 15 for s in pending),
                     'status_absent_configured_groups': sum(s['status_quality'] == 'absent' for s in self.groups.values()),
@@ -295,7 +313,8 @@ class BridgeDiagnostics:
             now = self.clock()
             groups = []
             for state in self.groups.values():
-                row = {k: v for k, v in state.items() if k not in ('last_bus_mono', 'pending_since', 'last_binary_status_mono')}
+                row = {k: v for k, v in state.items() if k not in ('last_bus_mono', 'pending_since', 'last_binary_status_mono', 'level_report_mono')}
+                row['level_report_age_s'] = None if state['level_report_mono'] is None else round(now - state['level_report_mono'], 1)
                 row['binary_observation_age_s'] = None if state['last_binary_status_mono'] is None else round(now - state['last_binary_status_mono'], 1)
                 row['observation_age_s'] = None if state['last_bus_mono'] is None else round(now - state['last_bus_mono'], 1)
                 if 'last_transition' in row:
@@ -311,10 +330,12 @@ class BridgeDiagnostics:
             if not connected:
                 self.counters['traffic_events_not_streamed_total'] += unseen
                 self.recent.clear()
+                self.activity.clear()
                 return None
             self.counters['traffic_events_sampled_out_total'] += max(0, unseen - 20)
             return {'schema': 1, 'ts': int(self.wall()), 'sequence': self.sequence,
-                    'events_since_publish': unseen, 'events': list(self.recent)}
+                    'events_since_publish': unseen, 'events': list(self.recent),
+                    'activity_events': list(self.activity)}
 
     def sample_unsupported(self, hexline):
         import hashlib

@@ -29,3 +29,7 @@ Release 7 adds configurable passive status monitoring; see
 
 Release 8 adds targeted numeric ramp readback; see
 [docs/RAMP-READBACK.md](docs/RAMP-READBACK.md) for rate limits and acceptance.
+
+Release 10 improves interface reply classification, live traffic readability and
+current-session numeric coverage; see [release notes](releases/RELEASE-10.md) and
+[optional HA updates](docs/RELEASE-10-HA.md).

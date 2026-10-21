@@ -1,139 +1,187 @@
 # Built-in cards; no custom frontend dependencies.
 title: C-Bus Observatory
 views:
-  - title: C-Bus Traffic
-    path: cbus-traffic
-    icon: mdi:lan
-    cards:
-      - type: markdown
-        title: C-Bus Observatory
-        content: >-
-          Live observations from the bridge, not a certification of the entire network.
-          Errors and counters are since bridge startup. Quiet groups are not automatically faulty.
-      - type: entities
-        title: Connection and traffic
-        entities:
-          - entity: sensor.cbus_diag_cni_age
-            name: "CNI connection age"
-          - entity: sensor.cbus_diag_mqtt_age
-            name: "MQTT connection age"
-          - entity: sensor.cbus_diag_last_rx_age
-            name: "Last RX age"
-          - entity: sensor.cbus_diag_rx_rate
-            name: "RX token rate"
-          - entity: sensor.cbus_diag_tx_rate
-            name: "TX frame rate"
-          - entity: sensor.cbus_diag_ack_ms
-            name: "Mean command ACK latency"
-          - entity: sensor.cbus_diag_cni_reconnects
-            name: "CNI reconnects"
-          - entity: sensor.cbus_diag_mqtt_reconnects
-            name: "MQTT reconnects"
-      - type: entities
-        title: Passive status monitoring
-        entities:
-          - entity: sensor.cbus_diag_monitor_requested
-            name: MONITOR requested
-          - entity: sensor.cbus_diag_binary_reports
-            name: Reports received
-          - entity: sensor.cbus_diag_binary_report_age
-            name: Last report age
-          - entity: sensor.cbus_diag_binary_errors
-            name: Groups reporting error
-          - entity: sensor.cbus_diag_binary_publishes
-            name: State updates
-          - entity: sensor.cbus_diag_binary_shared_skips
-            name: Shared numeric topics skipped
-      - type: history-graph
-        title: Traffic over time
-        hours_to_show: 2
-        entities:
-          - entity: sensor.cbus_diag_rx_rate
-            name: "RX token rate"
-          - entity: sensor.cbus_diag_tx_rate
-            name: "TX frame rate"
-      - type: entities
-        title: Observed quality and synchronization
-        entities:
-          - entity: sensor.cbus_diag_errors_5min
-            name: "Observed errors in 5 minutes"
-          - entity: sensor.cbus_diag_errors_total
-            name: "Observed errors"
-          - entity: sensor.cbus_diag_rx_checksum_failure_total
-            name: "RX checksum failures"
-          - entity: sensor.cbus_diag_rx_malformed_total
-            name: "Malformed supported frames"
-          - entity: sensor.cbus_diag_rx_unsupported_total
-            name: "Unsupported frames"
-          - entity: sensor.cbus_diag_status_invalid_encoding_groups_total
-            name: "Invalid status encodings"
-          - entity: sensor.cbus_diag_command_timeout_total
-            name: "Command timeouts"
-          - entity: sensor.cbus_diag_command_retries_exhausted_total
-            name: "Retries exhausted"
-          - entity: sensor.cbus_diag_command_corruption_total
-            name: "Command corruption ACKs"
-          - entity: sensor.cbus_diag_command_clock_loss_total
-            name: "Clock loss ACKs"
-          - entity: sensor.cbus_diag_pending_groups
-            name: "Awaiting status reply"
-          - entity: sensor.cbus_diag_overdue_groups
-            name: "No reply after 15 seconds"
-          - entity: sensor.cbus_diag_absent_groups
-            name: "Reported absent"
-          - entity: sensor.cbus_diag_invalid_groups
-            name: "Invalid status (current groups)"
-          - entity: sensor.cbus_diag_never_observed
-            name: "Groups never observed"
-      - type: entities
-        title: Command queue
-        entities:
-          - entity: sensor.cbus_diag_queue_depth
-            name: "Waiting commands"
-          - entity: sensor.cbus_diag_queue_full
-            name: "Rejected: queue full"
-          - entity: sensor.cbus_diag_queue_expired
-            name: "Discarded: expired"
-          - entity: sensor.cbus_diag_queue_discarded
-            name: "Discarded: disconnected"
-      - type: markdown
-        title: Live wire · latest 20 events
-        entity_id:
-          - sensor.cbus_diag_traffic
-        content: |-
-          {% if states('sensor.cbus_diag_traffic') in ['unknown', 'unavailable'] %}
-          **Live stream unavailable.** Waiting for fresh traffic-view heartbeats.
-          {% else %}
-          Updated {{ state_attr('sensor.cbus_diag_traffic', 'ts') | timestamp_custom('%H:%M:%S', true) }} · RX ← / TX → · sampled view, not a packet archive.
+- title: C-Bus Traffic
+  path: cbus-traffic
+  icon: mdi:lan
+  cards:
+  - type: markdown
+    title: C-Bus Observatory
+    content: Live observations from the bridge, not a certification of the entire network. Errors and counters are since bridge startup. Quiet groups are
+      not automatically faulty.
+  - type: entities
+    title: Connection and traffic
+    entities:
+    - entity: sensor.cbus_diag_cni_age
+      name: CNI connection age
+    - entity: sensor.cbus_diag_mqtt_age
+      name: MQTT connection age
+    - entity: sensor.cbus_diag_last_rx_age
+      name: Last RX age
+    - entity: sensor.cbus_diag_rx_rate
+      name: RX token rate
+    - entity: sensor.cbus_diag_tx_rate
+      name: TX frame rate
+    - entity: sensor.cbus_diag_ack_ms
+      name: Mean command ACK latency
+    - entity: sensor.cbus_diag_cni_reconnects
+      name: CNI reconnects
+    - entity: sensor.cbus_diag_mqtt_reconnects
+      name: MQTT reconnects
+  - type: entities
+    title: Passive status monitoring
+    entities:
+    - entity: sensor.cbus_diag_monitor_requested
+      name: MONITOR requested
+    - entity: sensor.cbus_diag_binary_reports
+      name: Reports received
+    - entity: sensor.cbus_diag_binary_report_age
+      name: Last report age
+    - entity: sensor.cbus_diag_binary_errors
+      name: Groups reporting error
+    - entity: sensor.cbus_diag_binary_publishes
+      name: State updates
+    - entity: sensor.cbus_diag_binary_shared_skips
+      name: Shared numeric topics skipped
+  - type: entities
+    title: Ramp feedback
+    entities:
+    - entity: sensor.cbus_diag_active_ramps
+      name: Active ramp watches
+    - entity: sensor.cbus_diag_ramp_readbacks
+      name: Ramp readback requests
+    - entity: sensor.cbus_diag_ramp_missing_replies
+      name: Ramp readbacks without usable replies
+    - entity: sensor.cbus_diag_ramp_readback_failures
+      name: Ramp watches with repeated missing replies
+    - entity: sensor.cbus_diag_ramp_completed
+      name: Completed ramp watches
+    - entity: sensor.cbus_diag_ramp_expired
+      name: Expired ramp watches
+    - entity: sensor.cbus_diag_ramp_queue_rejections
+      name: Ramp readback queue rejections
+    - entity: sensor.cbus_diag_ramp_queue_expired
+      name: Expired queued readbacks
+    - entity: sensor.cbus_diag_ramp_binary_suppressed
+      name: Binary updates deferred to numeric evidence
+  - type: history-graph
+    title: Traffic over time
+    hours_to_show: 2
+    entities:
+    - entity: sensor.cbus_diag_rx_rate
+      name: RX token rate
+    - entity: sensor.cbus_diag_tx_rate
+      name: TX frame rate
+  - type: entities
+    title: Observed quality and synchronization
+    entities:
+    - entity: sensor.cbus_diag_errors_5min
+      name: Observed errors in 5 minutes
+    - entity: sensor.cbus_diag_errors_total
+      name: Observed errors
+    - entity: sensor.cbus_diag_rx_checksum_failure_total
+      name: RX checksum failures
+    - entity: sensor.cbus_diag_rx_malformed_total
+      name: Malformed supported frames
+    - entity: sensor.cbus_diag_rx_unsupported_total
+      name: Unsupported frames
+    - entity: sensor.cbus_diag_status_invalid_encoding_groups_total
+      name: Invalid status encodings
+    - entity: sensor.cbus_diag_command_timeout_total
+      name: Command timeouts
+    - entity: sensor.cbus_diag_command_retries_exhausted_total
+      name: Retries exhausted
+    - entity: sensor.cbus_diag_command_corruption_total
+      name: Command corruption ACKs
+    - entity: sensor.cbus_diag_command_clock_loss_total
+      name: Clock loss ACKs
+    - entity: sensor.cbus_diag_pending_groups
+      name: Awaiting status reply
+    - entity: sensor.cbus_diag_overdue_groups
+      name: No reply after 15 seconds
+    - entity: sensor.cbus_diag_absent_groups
+      name: Reported absent
+    - entity: sensor.cbus_diag_invalid_groups
+      name: Invalid status (current groups)
+    - entity: sensor.cbus_diag_never_observed
+      name: Groups never observed
+    - entity: sensor.cbus_diag_session_level_confirmed
+      name: Groups with numeric reports this connection
+    - entity: sensor.cbus_diag_session_level_unconfirmed
+      name: Groups without numeric reports this connection
+  - type: entities
+    title: Command queue
+    entities:
+    - entity: sensor.cbus_diag_queue_depth
+      name: Waiting commands
+    - entity: sensor.cbus_diag_queue_full
+      name: 'Rejected: queue full'
+    - entity: sensor.cbus_diag_queue_expired
+      name: 'Discarded: expired'
+    - entity: sensor.cbus_diag_queue_discarded
+      name: 'Discarded: disconnected'
+  - type: markdown
+    title: Live wire · latest 20 events
+    entity_id:
+    - sensor.cbus_diag_traffic
+    content: |-
+      {% if states('sensor.cbus_diag_traffic') in ['unknown', 'unavailable'] %}
+      **Live stream unavailable.** Waiting for fresh traffic-view heartbeats.
+      {% else %}
+      Updated {{ state_attr('sensor.cbus_diag_traffic', 'ts') | timestamp_custom('%H:%M:%S', true) }} · RX ← / TX → · activity view; routine binary reports, ACKs and setup replies are in Detailed traffic. Not a packet archive.
 
-          | Time | Direction | Event | Details |
-          | :--- | :---: | :--- | :--- |
-          {% for e in (state_attr('sensor.cbus_diag_traffic', 'events') or []) | reverse -%}
-          | {{ e.ts | timestamp_custom('%H:%M:%S', true) }} | {{ '← RX' if e.direction == 'RX' else 'TX →' if e.direction == 'TX' else 'LOCAL' }} | {{ e.kind }} | {% if e.group is defined %}group {{ e.group }} {% endif %}{% if e.unit is defined %}unit {{ e.unit }} {% endif %}{% if e.command is defined %}cmd {{ '%02X' | format(e.command) }} {% endif %}{% if e.level is defined and e.level is not none %}level {{ e.level }} {% endif %}{% if e.code is defined %}{{ e.code }} {% endif %}{% if e.result is defined %}{{ e.result }} {% endif %}{% if e.start_group is defined %}block {{ e.start_group }} {% endif %}{% if e.hex is defined %}`{{ e.hex }}`{% endif %} |
-          {% endfor %}
-          {% endif %}
-      - type: entities
-        title: Stream sampling (not C-Bus errors)
-        entities:
-          - entity: sensor.cbus_diag_traffic_events_sampled_out_total
-            name: "Traffic view sampled events"
-          - entity: sensor.cbus_diag_traffic_events_not_streamed_total
-            name: "Traffic events not streamed"
-          - entity: sensor.cbus_diag_diagnostic_publish_failures_total
-            name: "Diagnostic publish failures"
-      - type: markdown
-        title: Group observation quality
-        entity_id:
-          - sensor.cbus_diag_groups
-        content: |-
-          {% if states('sensor.cbus_diag_groups') in ['unknown', 'unavailable'] %}
-          Waiting for a fresh group snapshot (every 30 seconds).
-          {% else %}
-          Reported level = C-Bus status. Observed command = a target, not measured output. Transmitted = successful command ACK only. Age is observation age, not a fault timeout.
+      | Time | Direction | Event | Details |
+      | :--- | :---: | :--- | :--- |
+      {% for e in (state_attr('sensor.cbus_diag_traffic', 'activity_events') if state_attr('sensor.cbus_diag_traffic', 'activity_events') is not none else state_attr('sensor.cbus_diag_traffic', 'events') or []) | reverse -%}
+      | {{ e.ts | timestamp_custom('%H:%M:%S', true) }} | {{ '← RX' if e.direction == 'RX' else 'TX →' if e.direction == 'TX' else 'LOCAL' }} | {{ e.kind }} | {% if e.group is defined %}group {{ e.group }} {% endif %}{% if e.unit is defined %}unit {{ e.unit }} {% endif %}{% if e.command is defined %}cmd {{ '%02X' | format(e.command) }} {% endif %}{% if e.level is defined and e.level is not none %}level {{ e.level }} {% endif %}{% if e.code is defined %}{{ e.code }} {% endif %}{% if e.result is defined %}{{ e.result }} {% endif %}{% if e.start_group is defined %}block {{ e.start_group }} {% endif %}{% if e.hex is defined %}`{{ e.hex }}`{% endif %} |
+      {% endfor %}
+      {% endif %}
+  - type: entities
+    title: Stream sampling (not C-Bus errors)
+    entities:
+    - entity: sensor.cbus_diag_traffic_events_sampled_out_total
+      name: Traffic view sampled events
+    - entity: sensor.cbus_diag_traffic_events_not_streamed_total
+      name: Traffic events not streamed
+    - entity: sensor.cbus_diag_diagnostic_publish_failures_total
+      name: Diagnostic publish failures
+    - entity: sensor.cbus_diag_setup_replies
+      name: Interface setup replies
+    - entity: sensor.cbus_diag_routine_events
+      name: Routine events omitted from activity view
+  - type: markdown
+    title: Group observation quality
+    entity_id:
+    - sensor.cbus_diag_groups
+    content: |-
+      {% if states('sensor.cbus_diag_groups') in ['unknown', 'unavailable'] %}
+      Waiting for a fresh group snapshot (every 30 seconds).
+      {% else %}
+      Reported level = C-Bus status. Observed command = a target, not measured output. Transmitted = successful command ACK only. Numeric report age is separate from commands/binary reports. Session confirmed resets on reconnect; historical levels remain visible. Absence means no numeric level returned, not proof of a fault.
 
-          | Group | Raw level (0–255) | Confidence | Observation age | Level status | Binary status | Binary age |
-          | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-          {% for g in state_attr('sensor.cbus_diag_groups', 'groups') or [] -%}
-          | {{ g.group }} | {{ g.published_level if g.published_level is not none else 'unknown' }} | {{ g.confidence }} | {{ (g.observation_age_s | string) + ' s' if g.observation_age_s is not none else 'never' }} | {{ g.status_quality }} | {{ g.binary_status | default('not_observed') }} | {{ (g.binary_observation_age_s | string) + ' s' if g.binary_observation_age_s is defined and g.binary_observation_age_s is not none else 'never' }} |
-          {% endfor %}
-          {% endif %}
+      | Group | Raw level (0–255) | Confidence | Observation age | Level status | Binary status | Binary age | Numeric age | This connection |
+      | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+      {% for g in state_attr('sensor.cbus_diag_groups', 'groups') or [] -%}
+      | {{ g.group }} | {{ g.published_level if g.published_level is not none else 'unknown' }} | {{ g.confidence }} | {{ (g.observation_age_s | string) + ' s' if g.observation_age_s is not none else 'never' }} | {{ g.status_quality }} | {{ g.binary_status | default('not_observed') }} | {{ (g.binary_observation_age_s | string) + ' s' if g.binary_observation_age_s is defined and g.binary_observation_age_s is not none else 'never' }} | {{ (g.level_report_age_s | string) + ' s' if g.level_report_age_s is defined and g.level_report_age_s is not none else 'unknown' }} | {{ 'reported' if g.session_level_seen | default(false) else 'unconfirmed' }} |
+      {% endfor %}
+      {% endif %}
+- title: Detailed traffic
+  path: detailed-traffic
+  icon: mdi:code-braces
+  cards:
+  - type: markdown
+    title: Detailed wire (sampled)
+    entity_id:
+    - sensor.cbus_diag_traffic
+    content: |-
+      {% if states('sensor.cbus_diag_traffic') in ['unknown', 'unavailable'] %}
+      **Live stream unavailable.** Waiting for fresh traffic-view heartbeats.
+      {% else %}
+      Updated {{ state_attr('sensor.cbus_diag_traffic', 'ts') | timestamp_custom('%H:%M:%S', true) }} · RX ← / TX → · detailed sampled view; last 20 events, not a packet archive.
+
+      | Time | Direction | Event | Details |
+      | :--- | :---: | :--- | :--- |
+      {% for e in (state_attr('sensor.cbus_diag_traffic', 'events') or []) | reverse -%}
+      | {{ e.ts | timestamp_custom('%H:%M:%S', true) }} | {{ '← RX' if e.direction == 'RX' else 'TX →' if e.direction == 'TX' else 'LOCAL' }} | {{ e.kind }} | {% if e.group is defined %}group {{ e.group }} {% endif %}{% if e.unit is defined %}unit {{ e.unit }} {% endif %}{% if e.command is defined %}cmd {{ '%02X' | format(e.command) }} {% endif %}{% if e.level is defined and e.level is not none %}level {{ e.level }} {% endif %}{% if e.code is defined %}{{ e.code }} {% endif %}{% if e.result is defined %}{{ e.result }} {% endif %}{% if e.start_group is defined %}block {{ e.start_group }} {% endif %}{% if e.hex is defined %}`{{ e.hex }}`{% endif %} |
+      {% endfor %}
+      {% endif %}

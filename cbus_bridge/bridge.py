@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple, Set, List
 import paho.mqtt.client as mqtt
 
 from .cni_connection import CniConnection
-from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame, RAMP_CODES, parse_binary_status_reply
+from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame, RAMP_CODES, parse_binary_status_reply, parse_interface_reply
 from .ha_profiles import GroupProfile
 from .utils import (
     BridgeDiagnostics,
@@ -71,6 +71,7 @@ class CbusMqttBridge:
         self.mqtt = mqtt_client
         self.profiles = profiles
         self.readonly = readonly
+        self._pending_setup = {}
         self.dimmer_ramp_cmd = dimmer_ramp_cmd
         self.ack_timeout_s = float(ack_timeout_s)
 
@@ -119,6 +120,7 @@ class CbusMqttBridge:
         return lease.atomic(operation, expire=expire) if lease is not None else operation()
 
     def cancel_session(self):
+        self._pending_setup = {}
         with self._state_publish_lock:
             self._last_published_state.clear()
             self.ramps.reset()
@@ -707,6 +709,9 @@ class CbusMqttBridge:
         if app != 56:
             LOG.warning("Init strings are hard-coded for app=56 (0x38). You passed app=%d.", app)
 
+        self._pending_setup = {"A3210038": time.monotonic()+10,
+                               "A3420002": time.monotonic()+10,
+                               "A3300079" if monitor else "A3300059": time.monotonic()+10}
         self.cni.send_line("A3210038g")
         self.diagnostics.tx("initialization")
         time.sleep(0.05)
@@ -827,6 +832,16 @@ class CbusMqttBridge:
                     self.diagnostics.event("echo", "RX")
                     LOG.debug("RX echo ignored: %r", text_line)
                     continue
+
+            pending = [cmd for cmd, deadline in self._pending_setup.items()
+                       if time.monotonic() <= deadline]
+            setup = parse_interface_reply(text_line, pending)
+            if setup:
+                self.diagnostics.bump('interface_setup_replies_total')
+                self.diagnostics.event('interface_setup_reply', 'RX', **setup)
+                self._pending_setup = {cmd: deadline for cmd, deadline in self._pending_setup.items()
+                                       if int(cmd[2:4],16) != setup['parameter'] and time.monotonic() <= deadline}
+                continue
 
             # Normal hex traffic
             norm = normalize_hex_from_bytes(raw)

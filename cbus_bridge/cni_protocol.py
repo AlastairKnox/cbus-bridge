@@ -189,3 +189,33 @@ def diagnose_frame(hexline: str) -> str:
             return "malformed"
         pos += width
     return "lighting" if parse_monitored_sals(hexline) else "malformed"
+
+
+def parse_interface_reply(text, expected_setup=None):
+    """Strict parameter acknowledgements; echoed setup requires a pending match.
+
+    Return metadata only. These replies never imply a lighting state or ACK tag.
+    """
+    value = text.upper()
+    echo = None
+    if expected_setup:
+        for command in expected_setup:
+            command = command.upper()
+            if value.startswith(command):
+                suffix = value[len(command):]
+                if suffix.startswith('G'):
+                    suffix = suffix[1:]
+                candidate = parse_interface_reply(suffix)
+                if candidate and candidate['parameter'] == int(command[2:4], 16):
+                    return {**candidate, 'echoed_setup': command}
+    if not re.fullmatch(r'[0-9A-F]+', value) or len(value) not in (8, 16):
+        return None
+    data = bytes.fromhex(value)
+    if sum(data) % 256:
+        return None
+    if len(data) == 4 and data[0] == 0x32 and data[2] == 0:
+        return {'parameter': data[1], 'unit': None, 'echoed_setup': echo}
+    if (len(data) == 8 and data[0] == 0x86 and data[1] == data[2]
+            and data[3] == 0 and data[4] == 0x32 and data[6] == 0):
+        return {'parameter': data[5], 'unit': data[1], 'echoed_setup': echo}
+    return None
