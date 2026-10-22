@@ -73,6 +73,7 @@ class CbusMqttBridge:
         self.profiles = profiles
         self.readonly = readonly
         self._duration_level = None
+        self._duration_key = None
         self._duration_level_event = threading.Event()
         self._duration_session = 0
         self._pending_setup = {}
@@ -334,7 +335,7 @@ class CbusMqttBridge:
         fan mode: publish preset numeric level and state ON/OFF.
         none: publish state ON/OFF only.
         """
-        if source == 'STATUS' and (p.net,p.app,p.group) == (254,56,13):
+        if source == 'STATUS' and (p.net,p.app,p.group) == self._duration_key:
             self._duration_level = int(level255)
             self._duration_level_event.set()
         remember_nonzero = True
@@ -503,6 +504,7 @@ class CbusMqttBridge:
                 raise
             except Exception:
                 self.ramps.ack(watch,False)
+                self.diagnostics.command_failure("send_failure", app=app_byte, group=group)
                 self.diagnostics.bump("command_send_failures_total")
                 self.diagnostics.event("command_result", "LOCAL", result="send_failure", tag=tag)
                 raise
@@ -517,6 +519,8 @@ class CbusMqttBridge:
         self._guarded(lambda: None, expire=False)
         outcome = "timeout" if not got else {".": "success", "#": "retries_exhausted", "$": "corruption", "%": "clock_loss", "!": "bang"}.get(res, "unknown")
         self.diagnostics.bump("command_" + outcome + "_total")
+        if outcome != "success":
+            self.diagnostics.command_failure(outcome, app=app_byte, group=group)
         if got:
             self.diagnostics.bump("command_acks_completed_total")
             self.diagnostics.bump("command_ack_latency_ms_sum", (time.monotonic() - started) * 1000)
@@ -557,11 +561,19 @@ class CbusMqttBridge:
         return self._send_lighting_command(app_byte=app_byte, cmd=ramp_cmd, group=group, level=level255)
 
     def _duration_start_level(self, profile):
+        self._duration_key = (profile.net, profile.app, profile.group)
+        try:
+            return self._wait_duration_start_level(profile)
+        finally:
+            self._duration_key = None
+
+    def _wait_duration_start_level(self, profile):
         # Never use a remembered ON value or old HA state to calculate a duration.
         # This runs on the existing command worker; the independent reader delivers
         # the numeric reply. Lease guards prevent sends after queue/session expiry.
         deadline = time.monotonic()+4
         session = self._duration_session
+        self._duration_key = (profile.net, profile.app, profile.group)
         self._duration_level = None
         self._duration_level_event.clear()
         while time.monotonic() < deadline:
@@ -592,24 +604,28 @@ class CbusMqttBridge:
     def _handle_transition(self, profile, text):
         if profile.level_mode != 'pct' or not profile.level_command_topic:
             self.diagnostics.bump('transition_rejected_total')
+            self.diagnostics.command_failure('unsupported_profile', app=profile.app, group=profile.group)
             return
         try:
             action, level, seconds = parse_transition_payload(text, profile.pct_scale)
         except ValueError:
             self.diagnostics.bump('transition_rejected_total')
+            self.diagnostics.command_failure('invalid_transition', app=profile.app, group=profile.group)
             LOG.warning('Rejected invalid dimmer transition')
             return
         duration = action in ('duration','duration_restore')
         start_level = nominal_duration = None
         requested_seconds = seconds
         if duration:
-            if self.readonly or (profile.net,profile.app,profile.group) != (254,56,13) or not self.ramps.enabled:
+            if self.readonly or not self.ramps.enabled:
+                self.diagnostics.command_failure('readonly' if self.readonly else 'tracking_disabled', app=profile.app, group=profile.group)
                 self.diagnostics.bump('transition_rejected_total')
                 return
             target = (profile.last_nonzero_255 if profile.last_nonzero_255 > 0 else 255) if action == 'duration_restore' else pct_to_level255(level,profile.pct_scale)
             if seconds:
                 start_level = self._duration_start_level(profile)
                 if start_level is None:
+                    self.diagnostics.command_failure('fresh_level_unavailable', app=profile.app, group=profile.group)
                     self.diagnostics.bump('duration_level_unavailable_total')
                     self.diagnostics.event('duration_transition_rejected','LOCAL',group=profile.group,
                                            result='fresh_level_unavailable')

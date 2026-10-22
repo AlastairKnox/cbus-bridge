@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import subprocess
 import tempfile
 import time
@@ -189,10 +190,32 @@ class Deployment:
         self.health()
         print('Previous application restored; service is stable. Confirm HA operation.')
 
+    def save_rollback_helper(self, backup):
+        home = self.root / 'home/ack'
+        if not home.is_dir():
+            raise RuntimeError('Cannot save rollback helper: /home/ack is missing')
+        target = home / 'cbus-bridge-rollback.sh'
+        command = 'sudo python3 ' + shlex.quote(str(backup / 'deploy.py')) + ' rollback ' + shlex.quote(str(backup))
+        fd, temp = tempfile.mkstemp(prefix='.cbus-rollback-', dir=home)
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                stream.write('#!/bin/sh\nset -eu\nexec ' + command + '\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            st = home.stat()
+            os.chown(temp, st.st_uid, st.st_gid)
+            os.chmod(temp, 0o700)
+            os.replace(temp, target)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
+        print(f'Saved rollback helper: {target}', flush=True)
+
     def apply(self, stage, commit):
         config = self.preflight(stage)
         backup = self.snapshot(stage, commit, config)
         print(f'Rollback: sudo python3 {backup}/deploy.py rollback {backup}', flush=True)
+        self.save_rollback_helper(backup)
         # Abort before stopping if production/config changed while making the snapshot.
         metadata = json.loads((backup / 'manifest.json').read_text())
         if inventory(self.live) != metadata['app_inventory']:

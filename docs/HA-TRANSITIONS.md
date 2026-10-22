@@ -122,3 +122,12 @@ References:
 - https://github.com/home-assistant/core/blob/dev/homeassistant/components/mqtt/light/schema_template.py
 - https://github.com/nielsfaber/scheduler-card (custom actions and numeric variables)
 - docs/RAMP-CONTROL.md (existing native rate semantics)
+
+## Release 13 extension
+
+The Study-only restriction above describes Release 12. Release 13 enables duration
+commands for configured writable percentage dimmers, including Upstairs group 72.
+Numeric readback is requested from the target group's block and filtered to the
+exact profile, so Study traffic cannot supply Upstairs' starting level. Existing
+HA default-schema lights may remain unchanged when dedicated schedule scripts
+publish the duration JSON directly to the configured ramp topic.

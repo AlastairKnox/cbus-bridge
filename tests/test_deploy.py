@@ -38,6 +38,7 @@ class DeploymentTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        (self.root / "home/ack").mkdir(parents=True)
         self.config = self.root / 'external-ha.yaml'
         self.config.write_text('private configuration')
         self.d = FakeDeployment(self.root, self.config)
@@ -59,6 +60,18 @@ class DeploymentTests(unittest.TestCase):
             p.chmod(0o600)
         self.original = deploy.inventory(self.d.live)
         self.commit = 'a' * 40
+
+    def test_rollback_helper_quotes_paths_and_replaces_atomically(self):
+        backup = self.root / "backup with spaces"
+        self.d.save_rollback_helper(backup)
+        helper = self.root / 'home/ack/cbus-bridge-rollback.sh'
+        self.assertIn("'" + str(backup / 'deploy.py') + "'", helper.read_text())
+        self.assertEqual(helper.stat().st_mode & 0o777, 0o700)
+        old = helper.read_bytes()
+        with patch.object(deploy.os, 'replace', side_effect=OSError('simulated')):
+            with self.assertRaises(OSError):
+                self.d.save_rollback_helper(self.root / 'next')
+        self.assertEqual(helper.read_bytes(), old)
 
     def backup(self):
         return next(self.d.backups.iterdir())

@@ -113,3 +113,10 @@ start another deployment.
 
 Tooling tests use isolated temporary files and fake service controls. Production
 activation of the installer still requires local sudo and manual HA acceptance.
+
+## Saved rollback helper (Release 13)
+
+Each verified deployment snapshot also updates `/home/ack/cbus-bridge-rollback.sh`
+atomically before production is stopped. Run `bash ~/cbus-bridge-rollback.sh` as
+ack to restore that snapshot. Keep off-host backups too. The helper covers bridge
+application files; separately edited HA schedules/scripts need their own rollback.

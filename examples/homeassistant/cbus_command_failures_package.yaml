@@ -1,0 +1,23 @@
+# Merge as a separate HA package after bridge Release 13 is deployed.
+# Compact attributes only; no raw traffic or credentials.
+mqtt:
+  sensor:
+    - name: C-Bus last command failure
+      unique_id: cbus_last_command_failure
+      default_entity_id: sensor.cbus_last_command_failure
+      state_topic: cbus/bridge/status/diagnostics
+      availability_topic: cbus/bridge/availability
+      expire_after: 30
+      entity_category: diagnostic
+      value_template: "{{ value_json.diagnostics.last_command_failure.reason if value_json.diagnostics.last_command_failure else 'none' }}"
+      json_attributes_topic: cbus/bridge/status/diagnostics
+      json_attributes_template: "{{ (value_json.diagnostics.last_command_failure or {}) | tojson }}"
+    - name: C-Bus command failures
+      unique_id: cbus_command_failures
+      default_entity_id: sensor.cbus_command_failures
+      state_topic: cbus/bridge/status/diagnostics
+      availability_topic: cbus/bridge/availability
+      expire_after: 30
+      entity_category: diagnostic
+      state_class: total_increasing
+      value_template: "{{ value_json.diagnostics.counters.command_failures_total | default(0) }}"

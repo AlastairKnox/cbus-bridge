@@ -112,6 +112,7 @@ class BridgeDiagnostics:
         self.buckets = deque(maxlen=61)
         self.tx_buckets = deque(maxlen=61)
         self.error_buckets = deque(maxlen=301)
+        self.last_command_failure = None
         self.last_observed_error_ts = None
         self.last_observed_error_kind = None
         self.sequence = 0
@@ -134,9 +135,20 @@ class BridgeDiagnostics:
             'profile_kind': 'writable' if p.command_topic else 'read_only',
         } for p in profiles.values()}
 
+    def command_failure(self, reason, *, app=None, group=None):
+        with self.lock:
+            self.counters['command_failures_total'] += 1
+            self.last_command_failure = {'reason': reason, 'app': app, 'group': group,
+                                         'timestamp': int(self.wall())}
+
     def bump(self, name, count=1):
         with self.lock:
             self.counters[name] += count
+            if count and name in {'queue_busy_rejected_total', 'queue_not_ready_rejected_total',
+                                  'queue_full_rejected_total', 'queue_expired_discarded_total',
+                                  'queue_session_changed_discarded_total', 'queue_disconnect_discarded_total',
+                                  'readonly_commands_ignored_total'}:
+                self.command_failure(name.removesuffix('_total'))
             if name in self.ERROR_COUNTERS:
                 self.last_observed_error_ts = int(self.wall())
                 self.last_observed_error_kind = name
@@ -295,6 +307,7 @@ class BridgeDiagnostics:
             counts = dict(self.counters)
             elapsed = max(1., min(60., now - self.started))
             return {'schema': 1, 'scope': 'observed_by_bridge', 'counters': counts,
+                    'last_command_failure': dict(self.last_command_failure) if self.last_command_failure else None,
                     'errors_observed_total': sum(counts.get(n, 0) for n in self.ERROR_COUNTERS),
                     'errors_observed_5min': sum(n for sec, n in self.error_buckets if sec > int(now) - 300),
                     'last_observed_error_ts': self.last_observed_error_ts,

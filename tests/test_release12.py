@@ -90,8 +90,8 @@ class DurationBridgeTests(unittest.TestCase):
                 self.assertIsNone(b._duration_start_level(p))
             b.cni.send_hex_frame.assert_called_once_with('05FF00730738004A')
 
-    def test_other_groups_readonly_and_disabled_tracker_cannot_use_duration_path(self):
-        for group,readonly,interval in [(72,False,3),(13,True,3),(13,False,0)]:
+    def test_readonly_and_disabled_tracker_cannot_use_duration_path(self):
+        for group,readonly,interval in [(13,True,3),(13,False,0)]:
             b,p=self.make(group,readonly,interval)
             self.send(b,p,{'level':50,'transition_seconds':20})
             b.cni.send_hex_frame.assert_not_called()
