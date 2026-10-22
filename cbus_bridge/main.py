@@ -14,7 +14,7 @@ import paho.mqtt.client as mqtt
 from .ha_profiles import load_ha_mqtt_profiles
 from .cni_connection import CniConnection
 from .bridge import CbusMqttBridge
-from .utils import BridgeDiagnostics, CommandWorker
+from .utils import BridgeDiagnostics, CommandWorker, command_requires_duration_wait
 from .utils import instance_lock, LatestPublisher, FunctionalHealth
 
 LOG = logging.getLogger("cbus_bridge")
@@ -361,7 +361,7 @@ def run(argv=None) -> int:
                 command = json.loads(payload) if payload.lstrip().startswith(b'{') else None
             except (ValueError, UnicodeError):
                 command = None
-            duration = isinstance(command, dict) and ('transition_seconds' in command or 'ramp_seconds' in command)
+            duration = command_requires_duration_wait(command)
             enqueue(lambda: bridge.handle_mqtt_command(topic, payload),
                     interactive=not duration, key=topic.rsplit('/',1)[0], duration=duration)
 

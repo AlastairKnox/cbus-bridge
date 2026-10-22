@@ -44,3 +44,7 @@ and rollback. The bridge installer does not activate the HA proposals.
 Release 14 adds continuous-operation safeguards: bounded/coalesced MQTT state
 publication, explicit readiness, CNI liveness checks, process watchdog recovery
 and priority for ordinary controls. See [release notes](releases/RELEASE-14.md).
+
+Release 15 queues overlapping fade requests across groups, preserves immediate UI
+priority and resumes fade acquisition after ordinary controls. See
+[release notes](releases/RELEASE-15.md) for queue limits and acceptance checks.

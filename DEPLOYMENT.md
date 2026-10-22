@@ -129,3 +129,10 @@ existing systemd Restart=always; the installer does not add service drop-ins.
 A second cooperating process on this host fails before opening MQTT/CNI sockets.
 Do not remove the lock file while a bridge is running. The checks are not a
 substitute for host monitoring or off-host backups.
+
+## Overlapping fades (Release 15)
+
+See releases/RELEASE-15.md. No HA reload is required. Acceptance should include
+simultaneous duration requests for Study and Upstairs, normal immediate controls,
+and final brightness/OFF feedback. Fresh-level queries remain globally spaced;
+fade starts can be staggered. Retain the pre-release backup and rollback helper.

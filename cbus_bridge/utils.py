@@ -398,14 +398,16 @@ class CommandRejected(Exception):
 
 
 class CommandWorker:
-    """One bounded FIFO; no retry/replay across link loss or expired deadlines."""
-    def __init__(self, diagnostics, capacity=32, ttl=5., clock=None, cancel=None):
+    """Bounded priority queue; no replay across link loss or expired deadlines."""
+    def __init__(self, diagnostics, capacity=32, ttl=5., clock=None, cancel=None,
+                 duration_capacity=8, duration_ttl=60.):
         import threading
         import time
         from collections import deque
         self.condition = threading.Condition(threading.RLock())
         self.items = deque()
         self.capacity, self.ttl = capacity, ttl
+        self.duration_capacity, self.duration_ttl = duration_capacity, duration_ttl
         self.clock = clock or time.monotonic
         self.diagnostics = diagnostics
         self.cancel = cancel or (lambda: None)
@@ -451,24 +453,30 @@ class CommandWorker:
             if self.stopped or not all(self.links.values()):
                 self.diagnostics.bump('queue_not_ready_rejected_total')
                 return False
-            if duration and (self.active_duration or any(item[5] for item in self.items)):
-                self.diagnostics.command_failure('duration_busy')
+            pending_durations = sum(item[5] and (key is None or item[4] != key)
+                                    for item in self.items)
+            if duration and pending_durations + int(self.active_duration) >= self.duration_capacity:
+                self._failure('duration_queue_full', key)
                 return False
             if key is not None:
                 old = len(self.items)
                 self.items = type(self.items)(item for item in self.items if item[4] != key)
                 self.diagnostics.bump('queue_coalesced_total', old-len(self.items))
             if interactive and len(self.items) >= self.capacity:
-                discard = next((i for i,item in enumerate(self.items) if not item[3]), None)
+                discard = next((i for i,item in enumerate(self.items) if not item[3] and not item[5]), None)
                 if discard is not None:
                     del self.items[discard]
                     self.diagnostics.command_failure('queue_background_displaced')
             if len(self.items) >= self.capacity:
                 self.diagnostics.bump('queue_full_rejected_total')
                 return False
-            item = (self.generation, self.clock() + self.ttl, operation, interactive, key, duration)
+            lifetime = self.duration_ttl if duration else self.ttl
+            item = (self.generation, self.clock() + lifetime, operation, interactive, key, duration)
             if interactive:
                 index = next((i for i, queued in enumerate(self.items) if not queued[3]), len(self.items))
+                self.items.insert(index, item)
+            elif duration:
+                index = next((i for i, queued in enumerate(self.items) if not queued[3] and not queued[5]), len(self.items))
                 self.items.insert(index, item)
             else:
                 self.items.append(item)
@@ -479,11 +487,24 @@ class CommandWorker:
         finally:
             self.condition.release()
 
+    def _failure(self, reason, key):
+        app = group = None
+        try:
+            parts = key.split('/')
+            app, group = int(parts[-2]), int(parts[-1])
+        except (AttributeError, ValueError, IndexError):
+            pass
+        self.diagnostics.command_failure(reason, app=app, group=group)
+        import logging
+        logging.getLogger('cbus_bridge').warning('Command rejected: %s app=%s group=%s', reason, app, group)
+
     def snapshot(self):
         with self.condition:
             return {'depth': len(self.items), 'capacity': self.capacity,
                     'high_water': self.high_water, 'active': self.active,
-                    'ready': not self.stopped and all(self.links.values()), 'ttl_s': self.ttl}
+                    'ready': not self.stopped and all(self.links.values()), 'ttl_s': self.ttl,
+                    'duration_pending': sum(item[5] for item in self.items) + int(self.active_duration),
+                    'duration_capacity': self.duration_capacity, 'duration_ttl_s': self.duration_ttl}
 
     def run_one(self):
         with self.condition:
@@ -497,9 +518,10 @@ class CommandWorker:
         class Lease:
             def yield_to_interactive(self):
                 with worker.condition:
+                    if key is not None and any(item[4] == key for item in worker.items):
+                        raise CommandRejected('superseded')
                     if any(item[3] for item in worker.items):
-                        worker.diagnostics.command_failure('duration_preempted')
-                        raise CommandRejected('duration_preempted')
+                        raise CommandRejected('duration_deferred')
 
             def atomic(self, action, expire=True):
                 with worker.condition:
@@ -518,7 +540,27 @@ class CommandWorker:
             operation(lease)
             self.diagnostics.bump('queue_completed_total')
         except CommandRejected as exc:
-            self.diagnostics.bump('queue_' + str(exc) + '_discarded_total')
+            reason = str(exc)
+            with self.condition:
+                # Yield only before the lighting write. Keep the original deadline;
+                # disconnect, newer same-group work or sustained controls cancel it.
+                can_resume = (reason == 'duration_deferred' and duration and
+                              generation == self.generation and not self.stopped and
+                              all(self.links.values()) and self.clock() < deadline and
+                              len(self.items) < self.capacity and
+                              not any(key is not None and item[4] == key for item in self.items))
+                if can_resume:
+                    self.active_duration = False
+                    index = next((i for i, queued in enumerate(self.items) if not queued[3]), len(self.items))
+                    self.items.insert(index, (generation, deadline, operation, interactive, key, duration))
+                    self.diagnostics.bump('duration_deferred_total')
+                    self.condition.notify()
+                else:
+                    self.diagnostics.bump('queue_' + reason + '_discarded_total')
+                    if reason == 'expired' or (reason == 'duration_deferred' and self.clock() >= deadline):
+                        self._failure('command_expired', key)
+                    elif reason == 'duration_deferred' and len(self.items) >= self.capacity:
+                        self._failure('duration_queue_full', key)
         except Exception:
             import logging
             logging.getLogger("cbus_bridge").warning("Queued operation failed; discarding session work")
@@ -545,6 +587,17 @@ class CommandWorker:
         with self.condition:
             self.stopped = True
         self.set_link('cni', False)
+
+
+def command_requires_duration_wait(command):
+    """Zero-time UI controls need neither fresh-level acquisition nor fade queueing."""
+    if not isinstance(command, dict):
+        return False
+    fields = [name for name in ('transition_seconds', 'ramp_seconds') if name in command]
+    if not fields:
+        return False
+    return not (len(fields) == 1 and type(command[fields[0]]) in (int, float)
+                and command[fields[0]] == 0)
 
 
 def parse_transition_payload(text, scale):

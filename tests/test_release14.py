@@ -167,7 +167,7 @@ class RecoveryTests(unittest.TestCase):
         thread=threading.Thread(target=w.run_one);thread.start()
         try:
             self.assertTrue(entered.wait(1))
-            self.assertFalse(w.submit(lambda lease:None,duration=True))
+            self.assertTrue(w.submit(lambda lease:None,duration=True))
             self.assertTrue(w.submit(lambda lease:sent.append('fan'),interactive=True))
             thread.join(1);self.assertFalse(thread.is_alive())
             b.cni.send_hex_frame.assert_not_called()
