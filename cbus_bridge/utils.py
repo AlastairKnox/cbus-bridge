@@ -126,6 +126,7 @@ class BridgeDiagnostics:
         self.groups = {f'{p.net}/{p.app}/{p.group}': {
             'net': p.net, 'app': p.app, 'group': p.group,
             'last_bus_ts': None, 'last_bus_mono': None, 'last_publish_ts': None,
+            'publication_semantics': 'accepted_locally_not_ha_receipt',
             'published_level': None, 'source': 'unknown', 'confidence': 'unknown',
             'pending_since': None, 'status_quality': 'not_requested',
             'binary_status': 'not_observed', 'last_binary_status_ts': None,
@@ -412,12 +413,17 @@ class CommandWorker:
         self.generation = 0
         self.stopped = False
         self.active = False
+        self.active_duration = False
+        self.health_progress = lambda: None
         self.high_water = 0
 
     def set_link(self, name, up):
         with self.condition:
             self.links[name] = up
             if not up:
+                # Link loss closes the CNI session; MQTT recovery alone must not
+                # authorize writes on the old or not-yet-initialized socket.
+                self.links['cni'] = False
                 self.generation += 1
                 self.diagnostics.bump('queue_disconnect_discarded_total', len(self.items))
                 self.items.clear()
@@ -435,7 +441,7 @@ class CommandWorker:
                 raise CommandRejected('session_changed')
             self.links['cni'] = True
 
-    def submit(self, operation):
+    def submit(self, operation, *, interactive=False, key=None, duration=False):
         # Never wait behind a socket send in the MQTT callback. Reject rather than
         # block if a short, bounded guarded send is currently in progress.
         if not self.condition.acquire(blocking=False):
@@ -445,10 +451,27 @@ class CommandWorker:
             if self.stopped or not all(self.links.values()):
                 self.diagnostics.bump('queue_not_ready_rejected_total')
                 return False
+            if duration and (self.active_duration or any(item[5] for item in self.items)):
+                self.diagnostics.command_failure('duration_busy')
+                return False
+            if key is not None:
+                old = len(self.items)
+                self.items = type(self.items)(item for item in self.items if item[4] != key)
+                self.diagnostics.bump('queue_coalesced_total', old-len(self.items))
+            if interactive and len(self.items) >= self.capacity:
+                discard = next((i for i,item in enumerate(self.items) if not item[3]), None)
+                if discard is not None:
+                    del self.items[discard]
+                    self.diagnostics.command_failure('queue_background_displaced')
             if len(self.items) >= self.capacity:
                 self.diagnostics.bump('queue_full_rejected_total')
                 return False
-            self.items.append((self.generation, self.clock() + self.ttl, operation))
+            item = (self.generation, self.clock() + self.ttl, operation, interactive, key, duration)
+            if interactive:
+                index = next((i for i, queued in enumerate(self.items) if not queued[3]), len(self.items))
+                self.items.insert(index, item)
+            else:
+                self.items.append(item)
             self.high_water = max(self.high_water, len(self.items))
             self.diagnostics.bump('queue_accepted_total')
             self.condition.notify()
@@ -466,11 +489,18 @@ class CommandWorker:
         with self.condition:
             if not self.items:
                 return False
-            generation, deadline, operation = self.items.popleft()
+            generation, deadline, operation, interactive, key, duration = self.items.popleft()
             self.active = True
+            self.active_duration = duration
         worker = self
 
         class Lease:
+            def yield_to_interactive(self):
+                with worker.condition:
+                    if any(item[3] for item in worker.items):
+                        worker.diagnostics.command_failure('duration_preempted')
+                        raise CommandRejected('duration_preempted')
+
             def atomic(self, action, expire=True):
                 with worker.condition:
                     if generation != worker.generation or worker.stopped or not all(worker.links.values()):
@@ -492,18 +522,21 @@ class CommandWorker:
         except Exception:
             import logging
             logging.getLogger("cbus_bridge").warning("Queued operation failed; discarding session work")
+            self.diagnostics.command_failure('operation_failed')
             self.diagnostics.bump('queue_operation_failures_total')
             # Do not execute remaining work after an ambiguous transport failure.
             self.set_link('cni', False)
         finally:
             with self.condition:
                 self.active = False
+                self.active_duration = False
         return True
 
     def run(self):
         while True:
+            self.health_progress()
             with self.condition:
-                self.condition.wait_for(lambda: self.stopped or bool(self.items))
+                self.condition.wait_for(lambda: self.stopped or bool(self.items), timeout=1)
                 if self.stopped:
                     return
             self.run_one()
@@ -757,3 +790,137 @@ class RampTracker:
                                'full_scale_seconds':e['seconds'],'phase':e['phase'],
                                'age_s':round(now-e['started'],1),'last_reported_level':e['last_level'],
                                'missing_replies':e['misses']} for key,e in self.entries.items()]}
+
+
+# Process reliability and bounded MQTT state delivery.
+import fcntl
+import os
+import stat
+import threading
+import time
+from contextlib import contextmanager
+from types import SimpleNamespace
+
+
+@contextmanager
+def instance_lock(path='/tmp/cbus-bridge.lock'):
+    # Never unlink: a second inode would allow a second simultaneous lock.
+    flags = os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | flags, 0o644)
+        os.fchmod(fd, 0o644)
+    except FileExistsError:
+        fd = os.open(path, os.O_RDONLY | flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError('Bridge lock must be a regular file')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('Another local C-Bus bridge is already running') from None
+        yield
+    finally:
+        os.close(fd)
+
+
+class LatestPublisher:
+    """One latest desired value per retained QoS1 topic; one in-flight per topic.
+
+    rc=0 means accepted locally, not broker/HA receipt. Acknowledged versions are
+    kept for reconnect replay. Paho's separate queue must also be bounded.
+    """
+    def __init__(self, client, diagnostics, capacity=1024, inflight=16, clock=None):
+        self.client, self.diagnostics = client, diagnostics
+        self.capacity, self.limit = capacity, inflight
+        self.clock = clock or time.monotonic
+        self.lock = threading.RLock()
+        from collections import OrderedDict
+        self.latest = OrderedDict()
+        self.pending = {}
+        self.confirmed = {}
+        self.version = 0
+        self.connected = False
+        self.failures = 0
+        self.first_rejection = None
+
+    def set_connected(self, up):
+        with self.lock:
+            self.connected = up
+            if up:
+                # Paho owns pending packets across reconnect. Do not duplicate
+                # them; send the latest desired version once those are ACKed.
+                self.confirmed.clear()
+
+    def publish(self, topic, payload=None, qos=0, retain=False, **kwargs):
+        if qos != 1 or not retain:
+            result = self.client.publish(topic, payload=payload, qos=qos, retain=retain, **kwargs)
+            if result.rc != 0:
+                self.diagnostics.bump('mqtt_publication_rejected_total')
+            return result
+        with self.lock:
+            if topic not in self.latest and len(self.latest) >= self.capacity:
+                self.diagnostics.bump('mqtt_publication_rejected_total')
+                return SimpleNamespace(rc=15)
+            self.version += 1
+            self.latest[topic] = (self.version, payload)
+        return SimpleNamespace(rc=0)
+
+    def pump(self):
+        with self.lock:
+            for topic, (version, info, started) in list(self.pending.items()):
+                if info.is_published() is True:
+                    self.first_rejection = None
+                    self.confirmed[topic] = version
+                    del self.pending[topic]
+            if not self.connected:
+                return
+            for topic, (version, payload) in list(self.latest.items()):
+                if len(self.pending) >= self.limit:
+                    break
+                if topic in self.pending or self.confirmed.get(topic) == version:
+                    continue
+                info = self.client.publish(topic, payload=payload, qos=1, retain=True)
+                if info.rc == 0:
+                    self.pending[topic] = (version, info, self.clock())
+                    self.latest.move_to_end(topic)
+                else:
+                    self.failures += 1
+                    if self.first_rejection is None:
+                        self.first_rejection = self.clock()
+                    self.diagnostics.bump('mqtt_publication_rejected_total')
+                    # Avoid a hot loop across every topic on a broken transport.
+                    break
+
+    def snapshot(self):
+        # Dictionary lengths/progress are copied under a nonblocking lock so a
+        # watchdog cannot itself be trapped behind a broken publish call.
+        if not self.lock.acquire(blocking=False):
+            return None
+        try:
+            return {'topics': len(self.latest), 'capacity': self.capacity,
+                    'pending': len(self.pending), 'pending_limit': self.limit,
+                    'oldest_pending_s': max((self.clock()-x[2] for x in self.pending.values()), default=0),
+                    'transport_rejection_age_s': 0 if self.first_rejection is None else self.clock()-self.first_rejection,
+                    'delivery_semantics': 'local_queue_then_broker_ack_not_physical_feedback'}
+        finally:
+            self.lock.release()
+
+
+class FunctionalHealth:
+    def __init__(self, clock=None, timeout=60):
+        self.clock = clock or time.monotonic
+        self.timeout = timeout
+        self.progress = {}
+
+    def beat(self, name):
+        self.progress[name] = self.clock()
+
+    def stalled(self):
+        now = self.clock()
+        return [name for name, when in self.progress.copy().items() if now-when > self.timeout]
+
+    def snapshot(self):
+        now = self.clock()
+        return {'progress_timeout_s': self.timeout,
+                'progress_age_s': {name: round(max(0,now-when),3) for name,when in self.progress.copy().items()},
+                'stalled': self.stalled()}

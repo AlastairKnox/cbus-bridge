@@ -120,3 +120,12 @@ Each verified deployment snapshot also updates `/home/ack/cbus-bridge-rollback.s
 atomically before production is stopped. Run `bash ~/cbus-bridge-rollback.sh` as
 ack to restore that snapshot. Keep off-host backups too. The helper covers bridge
 application files; separately edited HA schedules/scripts need their own rollback.
+
+## Continuous-operation safeguards (Release 14)
+
+See releases/RELEASE-14.md for readiness, bounded publication, quiet-link probes,
+functional watchdog deadlines, singleton exclusion and soak acceptance. These use
+existing systemd Restart=always; the installer does not add service drop-ins.
+A second cooperating process on this host fails before opening MQTT/CNI sockets.
+Do not remove the lock file while a bridge is running. The checks are not a
+substitute for host monitoring or off-host backups.

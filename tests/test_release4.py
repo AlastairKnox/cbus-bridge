@@ -181,7 +181,9 @@ class InstrumentationTests(unittest.TestCase):
 
     def test_actual_vs_optimistic_state_source_is_explicit(self):
         p = GroupProfile(254, 56, 1, state_topic='test')
-        bridge = CbusMqttBridge(Mock(), Mock(), {(254, 56, 1): p}, False)
+        client = Mock()
+        client.publish.return_value.rc = 0
+        bridge = CbusMqttBridge(Mock(), client, {(254, 56, 1): p}, False)
         bridge.publish_level(p, 128)
         self.assertEqual(bridge.diagnostics.group_snapshot()['groups'][0]['confidence'], 'transmitted')
         bridge.handle_cbus_level_update(56, 1, 255, source='SAL cmd=0x79')
@@ -191,6 +193,11 @@ class InstrumentationTests(unittest.TestCase):
 
 
 class SchedulerTests(unittest.TestCase):
+    def setUp(self):
+        timer = patch.object(app.threading, 'Timer')
+        timer.start()
+        self.addCleanup(timer.stop)
+
     def test_periodic_diagnostics_do_not_poll_cni_and_use_fresh_topics(self):
         import threading
         mqtt_up, cni_up = threading.Event(), threading.Event()

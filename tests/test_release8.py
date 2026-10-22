@@ -123,6 +123,11 @@ class TrackerTests(unittest.TestCase):
 
 
 class RampBridgeTests(unittest.TestCase):
+    def setUp(self):
+        timer = patch.object(app.threading, 'Timer')
+        timer.start()
+        self.addCleanup(timer.stop)
+
     def make(self, interval=10, readonly=False, mode='pct', ack='.'):
         p=GroupProfile(254,56,13,state_topic='state',level_state_topic='level',
                        command_topic='cbus/write/254/56/13/switch',

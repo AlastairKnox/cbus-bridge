@@ -60,14 +60,29 @@ class AckTests(unittest.TestCase):
                 self.assertEqual(self.bridge._ack_waiters, {})
 
 
+class AvailabilityPublisher:
+    def __init__(self, client, diagnostics): self.client = client
+    def publish(self, *args, **kwargs): return self.client.publish(*args, **kwargs)
+    def set_connected(self, up): pass
+    def snapshot(self): return {}
+    def pump(self): pass
+
+
 class AvailabilityTests(unittest.TestCase):
-    def test_mqtt_reconnect_republishes_online_when_cni_stays_up(self):
+    def setUp(self):
+        self.publisher_patch = patch.object(app, 'LatestPublisher', AvailabilityPublisher)
+        self.publisher_patch.start()
+        self.addCleanup(self.publisher_patch.stop)
+
+    def test_mqtt_reconnect_waits_for_a_new_cni_ready_session(self):
         client, cni = Mock(), Mock()
         cni.failover_status.return_value = {}
         cni.active_port = 10001
         bridge = Mock()
         bridge.ramps.snapshot.return_value = {}
         def read_loop(**kwargs):
+            client.on_connect(client, None, {}, 0)
+            kwargs['on_ready']()
             client.on_disconnect(client, None, 1)
             client.on_connect(client, None, {}, 0)
             raise StopRun()
@@ -80,7 +95,7 @@ class AvailabilityTests(unittest.TestCase):
                 app.main(['--cni-host', 'example.invalid', '--ha-config', 'unused'])
         availability = [c.kwargs['payload'] for c in client.publish.call_args_list
                         if c.args[0] == app.AVAIL_TOPIC_DEFAULT]
-        self.assertEqual(availability, ['online', 'offline', 'online'])
+        self.assertEqual(availability, ['offline', 'offline', 'online', 'offline', 'offline'])
 
     def test_mqtt_connect_before_cni_reports_offline(self):
         client = Mock()

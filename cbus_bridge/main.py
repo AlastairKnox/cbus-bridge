@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import time
 import threading
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from .ha_profiles import load_ha_mqtt_profiles
 from .cni_connection import CniConnection
 from .bridge import CbusMqttBridge
 from .utils import BridgeDiagnostics, CommandWorker
+from .utils import instance_lock, LatestPublisher, FunctionalHealth
 
 LOG = logging.getLogger("cbus_bridge")
 
@@ -109,6 +111,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    with instance_lock():
+        return run(argv)
+
+
+def run(argv=None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     if args.ramp_readback_every != 0 and not 3 <= args.ramp_readback_every <= 60:
@@ -162,6 +169,8 @@ def main(argv=None) -> int:
     if args.mqtt_user:
         mc.username_pw_set(args.mqtt_user, args.mqtt_pass or "")
     mc.reconnect_delay_set(min_delay=2, max_delay=30)
+    mc.max_queued_messages_set(32)
+    mc.max_inflight_messages_set(16)
 
     # LWT for availability
     mc.will_set(args.availability_topic, payload=AVAIL_OFFLINE, qos=1, retain=True)
@@ -178,13 +187,17 @@ def main(argv=None) -> int:
     )
 
     diagnostics = BridgeDiagnostics(profiles)
-    bridge = CbusMqttBridge(cni=cni, mqtt_client=mc, profiles=profiles, readonly=readonly,
+    publisher = LatestPublisher(mc, diagnostics)
+    bridge = CbusMqttBridge(cni=cni, mqtt_client=publisher, profiles=profiles, readonly=readonly,
                             diagnostics=diagnostics, ramp_readback_every=args.ramp_readback_every)
 
     worker = CommandWorker(diagnostics, cancel=bridge.cancel_session)
+    health = FunctionalHealth(timeout=60)
+    bridge.health_progress = lambda: health.beat('reader')
+    worker.health_progress = lambda: health.beat('worker')
 
     def publish_availability(state: str, reason: str = "") -> None:
-        mc.publish(args.availability_topic, payload=state, qos=1, retain=True)
+        publisher.publish(args.availability_topic, payload=state, qos=1, retain=True)
         if reason:
             LOG.info("Availability -> %s (%s)", state, reason)
         else:
@@ -223,6 +236,8 @@ def main(argv=None) -> int:
             "diagnostics": diagnostics.snapshot(),
             "command_queue": worker.snapshot(),
             "ramp_tracking": bridge.ramps.snapshot(),
+            "mqtt_publications": publisher.snapshot(),
+            "functional_health": health.snapshot(),
 
             "last_mqtt_connect_ts": metrics.last_mqtt_connect_ts,
             "last_mqtt_disconnect_ts": metrics.last_mqtt_disconnect_ts,
@@ -245,7 +260,7 @@ def main(argv=None) -> int:
 
     def publish_status(reason: str = "") -> None:
         payload = json.dumps(build_status(reason), separators=(",", ":"), sort_keys=True)
-        mc.publish(args.status_topic, payload=payload, qos=1, retain=True)
+        publisher.publish(args.status_topic, payload=payload, qos=1, retain=True)
         if args.diagnostics_every and mqtt_up.is_set():
             info = mc.publish(args.status_topic + "/diagnostics", payload=payload, qos=0, retain=False)
             if info.rc != mqtt.MQTT_ERR_SUCCESS:
@@ -256,6 +271,7 @@ def main(argv=None) -> int:
     def on_connect(client, userdata, flags, reason_code, properties=None):
         rc_val = getattr(reason_code, "value", reason_code)
         if rc_val == 0:
+            publisher.set_connected(True)
             mqtt_up.set()
             worker.set_link("mqtt", True)
             metrics.mqtt_connects_total += 1
@@ -269,7 +285,7 @@ def main(argv=None) -> int:
             LOG.info("Subscribed to %s", args.resync_topic)
 
             publish_availability(
-                AVAIL_ONLINE if cni_up.is_set() else AVAIL_OFFLINE,
+                AVAIL_ONLINE if cni_up.is_set() and worker.snapshot()["ready"] else AVAIL_OFFLINE,
                 "MQTT connected; CNI connected" if cni_up.is_set() else "MQTT up, awaiting CNI",
             )
 
@@ -283,6 +299,7 @@ def main(argv=None) -> int:
     
     
     def on_disconnect(client, userdata, *args, **kwargs):
+        publisher.set_connected(False)
         mqtt_up.clear()
         worker.set_link("mqtt", False)
         metrics.mqtt_disconnects_total += 1
@@ -310,8 +327,10 @@ def main(argv=None) -> int:
     command_topics = {topic for profile in profiles.values()
                       for topic in (profile.command_topic, profile.level_command_topic) if topic}
 
-    def enqueue(operation):
-        return worker.submit(lambda lease: bridge.execute_queued(operation, lease))
+    def enqueue(operation, **options):
+        return worker.submit(lambda lease: bridge.execute_queued(operation, lease), **options)
+
+    last_resync_admission = [float('-inf')]
 
     def on_message(client, userdata, msg):
         metrics.last_mqtt_rx_ts = now_epoch()
@@ -329,19 +348,38 @@ def main(argv=None) -> int:
             mode = ("full" if text in ("resync_full", "full") else
                     args.resync_mode if text in ("resync", "sync", "status") else None)
             if mode:
-                enqueue(lambda: perform_resync(mode))
+                now = time.monotonic()
+                if now-last_resync_admission[0] < 30:
+                    diagnostics.command_failure('resync_rate_limited')
+                else:
+                    last_resync_admission[0] = now
+                    enqueue(lambda: perform_resync(mode), key='resync')
             return
         if msg.topic in command_topics:
             topic, payload = msg.topic, bytes(msg.payload)
-            enqueue(lambda: bridge.handle_mqtt_command(topic, payload))
+            try:
+                command = json.loads(payload) if payload.lstrip().startswith(b'{') else None
+            except (ValueError, UnicodeError):
+                command = None
+            duration = isinstance(command, dict) and ('transition_seconds' in command or 'ramp_seconds' in command)
+            enqueue(lambda: bridge.handle_mqtt_command(topic, payload),
+                    interactive=not duration, key=topic.rsplit('/',1)[0], duration=duration)
 
     mc.on_connect = on_connect
     mc.on_disconnect = on_disconnect
     mc.on_message = on_message
 
     LOG.info("Connecting to MQTT %s:%d", args.mqtt_host, args.mqtt_port)
-    mc.connect(args.mqtt_host, args.mqtt_port, keepalive=60)
-    mc.loop_start()
+    startup_deadline = threading.Timer(60, lambda: os._exit(1))
+    startup_deadline.daemon = True
+    startup_deadline.start()
+    try:
+        mc.connect(args.mqtt_host, args.mqtt_port, keepalive=60)
+        loop_result = mc.loop_start()
+        if isinstance(loop_result, int) and loop_result != mqtt.MQTT_ERR_SUCCESS:
+            raise RuntimeError('MQTT network thread failed to start')
+    finally:
+        startup_deadline.cancel()
     worker_thread = threading.Thread(target=worker.run, name="cbus-command-worker", daemon=True)
     worker_thread.start()
 
@@ -354,7 +392,10 @@ def main(argv=None) -> int:
             stop_event.wait(args.resync_every)
             if stop_event.is_set():
                 break
-            enqueue(lambda: perform_resync(args.resync_mode))
+            now = time.monotonic()
+            if now-last_resync_admission[0] >= 30:
+                last_resync_admission[0] = now
+                enqueue(lambda: perform_resync(args.resync_mode), key='resync')
 
     if args.resync_every and args.resync_every > 0:
         threading.Thread(target=resync_loop, name="cbus-resync", daemon=True).start()
@@ -365,10 +406,19 @@ def main(argv=None) -> int:
     status_interval = min(intervals) if intervals else 0
 
     def metrics_loop():
-        next_status = next_traffic = next_groups = 0.0
+        next_status = next_traffic = next_groups = next_mqtt_probe = 0.0
         while not stop_event.wait(0.25):
+            health.beat('metrics')
             now = time.monotonic()
             try:
+                publisher.pump()
+                if mqtt_up.is_set() and now >= next_mqtt_probe:
+                    next_mqtt_probe = now + 30
+                    usable = cni_up.is_set() and worker.snapshot()['ready']
+                    publisher.publish(args.availability_topic,
+                                      payload=AVAIL_ONLINE if usable else AVAIL_OFFLINE,
+                                      qos=1, retain=True)
+                bridge.queue_health_probe(worker)
                 bridge.queue_ramp_readback(worker)
                 if status_interval and now >= next_status:
                     next_status = now + status_interval
@@ -388,29 +438,60 @@ def main(argv=None) -> int:
                 set_last_error(f"Metrics publish failed: {e!r}")
                 LOG.warning("Metrics publish failed: %s", e)
 
-    if status_interval or args.traffic_every or args.ramp_readback_every:
-        threading.Thread(target=metrics_loop, name="cbus-metrics", daemon=True).start()
-        LOG.info("Diagnostics intervals: status=%ss, traffic=%ss", status_interval, args.traffic_every)
+    # Always service the bounded publisher and liveness checks, even with UI metrics off.
+    metrics_thread = threading.Thread(target=metrics_loop, name="cbus-metrics", daemon=True)
+    metrics_thread.start()
+    LOG.info("Diagnostics intervals: status=%ss, traffic=%ss", status_interval, args.traffic_every)
+
+    for name in ('reader', 'worker', 'metrics'):
+        health.beat(name)
+
+    def watchdog_loop():
+        while not stop_event.wait(1):
+            stalled = health.stalled()
+            if not worker_thread.is_alive():
+                stalled.append('worker_exited')
+            if not metrics_thread.is_alive():
+                stalled.append('metrics_exited')
+            view = publisher.snapshot()
+            if view is not None and max(view['oldest_pending_s'], view['transport_rejection_age_s']) > 90:
+                stalled.append('mqtt_puback_stalled')
+            if stalled:
+                # Logging can itself block on a full journal pipe. Never wait for it.
+                try:
+                    threading.Thread(target=lambda: LOG.critical('Functional watchdog restarting process: %s', ','.join(stalled)), daemon=True).start()
+                finally:
+                    os._exit(1)
+                # No cleanup locks here: a stuck worker must not defeat recovery.
+                # systemd Restart=always restarts the process; LWT marks it offline.
+
+    threading.Thread(target=watchdog_loop, name='cbus-watchdog', daemon=True).start()
 
     # ---- CNI reconnect loop ----
     try:
         while True:
             try:
+                health.beat("reader")
                 session_token = worker.session_token()
                 cni.connect()
                 diagnostics.reset_connection()
                 diagnostics.event("cni_connected", "LOCAL")
-                cni_up.set()
                 metrics.cni_connects_total += 1
                 metrics.last_cni_connect_ts = now_epoch()
                 metrics.last_cni_connect_mono = time.monotonic()
 
                 # Availability reason includes the active port (primary or secondary)
-                publish_availability(AVAIL_ONLINE, f"CNI connected (port {cni.active_port})")
-                publish_status("cni_connected")
+                publish_availability(AVAIL_OFFLINE, 'CNI initializing')
+                publish_status('cni_initializing')
+
+                def ready():
+                    worker.ready_cni(session_token)
+                    cni_up.set()
+                    publish_availability(AVAIL_ONLINE if mqtt_up.is_set() else AVAIL_OFFLINE, 'CNI ready')
+                    publish_status('cni_ready')
 
                 bridge.run_forever(init=args.init, status=args.status, status_include_96=args.status_include_96,
-                                   on_ready=lambda: worker.ready_cni(session_token), monitor=args.monitor)
+                                   on_ready=ready, monitor=args.monitor)
 
             except Exception as e:
                 worker.set_link("cni", False)
@@ -433,6 +514,7 @@ def main(argv=None) -> int:
                     cni.close()
                 except Exception:
                     pass
+                health.beat("reader")
                 time.sleep(3)
 
     finally:

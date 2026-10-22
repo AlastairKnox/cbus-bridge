@@ -76,6 +76,10 @@ class CbusMqttBridge:
         self._duration_key = None
         self._duration_level_event = threading.Event()
         self._duration_session = 0
+        self.health_progress = lambda: None
+        self._last_valid_rx = time.monotonic()
+        self._health_waiting = None
+        self._health_probe_queued = False
         self._pending_setup = {}
         self.dimmer_ramp_cmd = dimmer_ramp_cmd
         self.ack_timeout_s = float(ack_timeout_s)
@@ -98,6 +102,7 @@ class CbusMqttBridge:
         # Tag generator (g..z)
         self._tag_lock = threading.Lock()
         self._tag_index = 0
+        self._setup_tag_reserved = False
 
         # Waiters keyed by tag
         self._ack_lock = threading.Lock()
@@ -125,6 +130,8 @@ class CbusMqttBridge:
         return lease.atomic(operation, expire=expire) if lease is not None else operation()
 
     def cancel_session(self):
+        self._health_waiting = None
+        self._health_probe_queued = False
         self._duration_session += 1
         self._duration_level = None
         self._duration_level_event.set()
@@ -286,6 +293,34 @@ class CbusMqttBridge:
             self.ramps.release(token)
             self.diagnostics.bump('ramp_readback_queue_rejections_total')
 
+    def queue_health_probe(self, worker):
+        if self._health_probe_queued and time.monotonic()-self._health_probe_queued >= 6:
+            self._health_probe_queued = False
+        if self.readonly or not self.profiles or self._health_probe_queued or self._health_waiting is not None:
+            return
+        if time.monotonic()-self._last_valid_rx < 120 or not worker.snapshot()['ready']:
+            return
+        profile = next(iter(self.profiles.values()))
+        self._health_probe_queued = time.monotonic()
+        def probe():
+            self._health_probe_queued = False
+            if time.monotonic()-self._last_valid_rx < 120:
+                return
+            def send(app, start):
+                self._health_waiting = (app, start, time.monotonic())
+                self._send_status_block(app, start)
+            self._guarded(lambda:self.ramps.send_duration_probe(profile.app, profile.group//32*32, send))
+        if not worker.submit(lambda lease:self.execute_queued(probe, lease)):
+            self._health_probe_queued = False
+
+    def _valid_rx(self, *, status=None):
+        self._last_valid_rx = time.monotonic()
+        if status is not None and self._health_waiting is not None:
+            app, start, _ = self._health_waiting
+            if status.app == app and status.start_group == start:
+                self._health_waiting = None
+                self.diagnostics.bump('health_probe_replies_total')
+
     def _send_status_block(self, app, start):
         if self.readonly:
             return
@@ -346,7 +381,6 @@ class CbusMqttBridge:
                 self.ramps.observe(p.app,p.group,level255)
                 remember_nonzero = self.ramps.remember_level(p.app,p.group,level255)
         level255 = clamp(int(level255), 0, 255)
-        self.diagnostics.published(p, level255, source)
 
         if p.level_mode == "pct":
             pct = level255_to_pct(level255, p.pct_scale)
@@ -355,7 +389,11 @@ class CbusMqttBridge:
             if pct > 0 and remember_nonzero:
                 p.last_nonzero_255 = level255
             if p.level_state_topic:
-                self.mqtt.publish(self._topic_for(p, "level"), payload=str(pct), retain=True, qos=1)
+                info = self.mqtt.publish(self._topic_for(p, "level"), payload=str(pct), retain=True, qos=1)
+                if info.rc not in (0,) and isinstance(info.rc, int):
+                    self.diagnostics.bump('state_publication_rejected_total')
+                    return
+            self.diagnostics.published(p, level255, source)
             if self._topic_for(p, "state") != self._topic_for(p, "level"):
                 self.publish_state(p, pct > 0)
             return
@@ -366,12 +404,17 @@ class CbusMqttBridge:
                 p.last_nonzero_255 = q
             out = p.fan_off_value_for_ha if (q == 0 and p.fan_off_value_for_ha == 5) else q
             if p.level_state_topic:
-                self.mqtt.publish(self._topic_for(p, "level"), payload=str(out), retain=True, qos=1)
+                info = self.mqtt.publish(self._topic_for(p, "level"), payload=str(out), retain=True, qos=1)
+                if info.rc not in (0,) and isinstance(info.rc, int):
+                    self.diagnostics.bump('state_publication_rejected_total')
+                    return
+            self.diagnostics.published(p, level255, source)
             if self._topic_for(p, "state") != self._topic_for(p, "level"):
                 self.publish_state(p, q > 0)
             return
 
-        self.publish_state(p, level255 > 0)
+        if self.publish_state(p, level255 > 0) != 'failed':
+            self.diagnostics.published(p, level255, source)
 
     def handle_cbus_level_update(self, app: int, group: int, level255: int, *, source: str = "") -> None:
         """
@@ -413,9 +456,11 @@ class CbusMqttBridge:
     # ----------------------------
     def _next_tag(self) -> str:
         with self._tag_lock:
-            tag = chr(ord("g") + (self._tag_index % 20))
-            self._tag_index += 1
-            return tag
+            while True:
+                tag = chr(ord("g") + (self._tag_index % 20))
+                self._tag_index += 1
+                if not (self._setup_tag_reserved and tag == 'g'):
+                    return tag
 
     def _register_waiter(self, tag: str) -> AckWaiter:
         w = AckWaiter(event=threading.Event(), result=None)
@@ -577,6 +622,9 @@ class CbusMqttBridge:
         self._duration_level = None
         self._duration_level_event.clear()
         while time.monotonic() < deadline:
+            lease = getattr(self._command_local, 'lease', None)
+            if lease is not None:
+                lease.yield_to_interactive()
             if session != self._duration_session:
                 return None
             def probe(app, start):
@@ -595,7 +643,14 @@ class CbusMqttBridge:
         # No transaction IDs exist: a coincident valid unsolicited numeric report
         # is also acceptable fresh network evidence, as with ordinary readback.
         remaining = min(3,max(0,deadline-time.monotonic()))
-        self._duration_level_event.wait(remaining)
+        until = time.monotonic()+remaining
+        while self._duration_level is None and time.monotonic() < until:
+            lease = getattr(self._command_local, 'lease', None)
+            if lease is not None:
+                lease.yield_to_interactive()
+            if session != self._duration_session:
+                return None
+            self._duration_level_event.wait(min(.05,max(0,until-time.monotonic())))
         if session != self._duration_session:
             return None
         self._guarded(lambda:None)
@@ -718,6 +773,7 @@ class CbusMqttBridge:
                     self.publish_level(p, 255)
                 return
 
+            self.diagnostics.command_failure("invalid_switch_payload", app=app, group=group)
             LOG.warning("Unexpected switch payload for group=%d%s: %r", group, p_suffix, text)
             return
 
@@ -726,11 +782,13 @@ class CbusMqttBridge:
         if text.startswith(('{', '[', '"', '\ufeff')):
             if len(payload) > 256:
                 self.diagnostics.bump('transition_rejected_total')
+                self.diagnostics.command_failure('invalid_transition_encoding_or_size', app=app, group=group)
                 return
             try:
                 strict_text = payload.decode('utf-8').strip()
             except UnicodeDecodeError:
                 self.diagnostics.bump('transition_rejected_total')
+                self.diagnostics.command_failure('invalid_transition_encoding_or_size', app=app, group=group)
                 return
             self._handle_transition(p, strict_text)
             return
@@ -738,6 +796,7 @@ class CbusMqttBridge:
         # action == "ramp"
         val = parse_first_int(text)
         if val is None:
+            self.diagnostics.command_failure("invalid_numeric_payload", app=app, group=group)
             LOG.warning("Bad ramp payload for group=%d%s: %r", group, p_suffix, text)
             return
 
@@ -787,6 +846,7 @@ class CbusMqttBridge:
         if self.readonly:
             LOG.info("[readonly] Skipping CNI initialization")
             return
+        self._setup_tag_reserved = True  # setup ACK g must never satisfy a lighting write
         self.cni.send_line("~~~")
         self.diagnostics.tx("initialization")
         time.sleep(0.1)
@@ -882,12 +942,16 @@ class CbusMqttBridge:
             self.request_status_blocks(app_byte=0x38 if app == 56 else app, groups=groups, include_96=status_include_96)
 
         LOG.info("Entering read loop")
+        self._last_valid_rx = time.monotonic()
+        if on_ready is not None:
+            on_ready()
         while True:
+            self.health_progress()
+            if self._health_waiting is not None and time.monotonic()-self._health_waiting[2] >= 10:
+                self.diagnostics.bump('health_probe_timeouts_total')
+                raise ConnectionError('CNI functional status probe timed out')
             raw = self.cni.recv_line_bytes()
             if raw is None or not raw:
-                if raw is None and on_ready is not None:
-                    on_ready()
-                    on_ready = None
                 continue
 
             self.diagnostics.rx()
@@ -902,6 +966,7 @@ class CbusMqttBridge:
                     continue
 
                 if ACK_LINE_RE.match(text_line):
+                    self._valid_rx()
                     tag = text_line[0]
                     res = text_line[1]
                     self.diagnostics.bump("ack_tokens_total")
@@ -921,6 +986,7 @@ class CbusMqttBridge:
                        if time.monotonic() <= deadline]
             setup = parse_interface_reply(text_line, pending)
             if setup:
+                self._valid_rx()
                 self.diagnostics.bump('interface_setup_replies_total')
                 self.diagnostics.event('interface_setup_reply', 'RX', **setup)
                 self._pending_setup = {cmd: deadline for cmd, deadline in self._pending_setup.items()
@@ -947,10 +1013,12 @@ class CbusMqttBridge:
                 self.diagnostics.bump("normalized_tokens_total")
             binary_reply = parse_binary_status_reply(norm)
             if binary_reply and binary_reply.app == 0x38:
+                self._valid_rx()
                 self.handle_binary_status(binary_reply)
                 continue
             sr = parse_status_reply(norm)
             if sr and sr.app == 0x38:
+                self._valid_rx(status=sr)
                 self.diagnostics.status(sr)
                 LOG.debug(
                     "RX status-reply: hdr=0x%02X coding=0x%02X app=0x%02X start_group=%d",
@@ -965,6 +1033,7 @@ class CbusMqttBridge:
 
             sals = parse_monitored_sals(norm)
             for sal in (item for item in sals if item.app == 0x38):
+                self._valid_rx()
                 self.diagnostics.bump("lighting_commands_observed_total")
                 self.diagnostics.observed(sal.app, sal.group)
                 self.diagnostics.event("lighting", "RX", app=sal.app, group=sal.group,

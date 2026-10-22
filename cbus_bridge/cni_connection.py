@@ -114,6 +114,11 @@ class CniConnection:
     def _connect_to(self, host: str, port: int) -> socket.socket:
         LOG.info("Connecting to CNI %s:%d", host, port)
         s = socket.create_connection((host, port), timeout=self.timeout)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for name, value in [('TCP_KEEPIDLE', 60), ('TCP_KEEPINTVL', 10), ('TCP_KEEPCNT', 3)]:
+            option = getattr(socket, name, None)
+            if option is not None:
+                s.setsockopt(socket.IPPROTO_TCP, option, value)
         s.settimeout(self.rx_timeout_s)
         return s
 

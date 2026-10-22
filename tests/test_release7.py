@@ -166,6 +166,11 @@ class BinaryBridgeTests(unittest.TestCase):
 
 
 class MonitorConfigurationTests(unittest.TestCase):
+    def setUp(self):
+        timer = patch.object(app.threading, 'Timer')
+        timer.start()
+        self.addCleanup(timer.stop)
+
     def test_only_monitor_bit_changes_and_exstat_remains_off(self):
         for enabled, command in [(False,'A3300059g'), (True,'A3300079g')]:
             b = CbusMqttBridge(Mock(),Mock(),{},False)

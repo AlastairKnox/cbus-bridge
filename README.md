@@ -40,3 +40,7 @@ automatic block request per three seconds. See [release notes](releases/RELEASE-
 Release 12 prepares a Study-only HA transition-duration trial; see
 [HA transitions](docs/HA-TRANSITIONS.md) for the optional HA definition, scheduling
 and rollback. The bridge installer does not activate the HA proposals.
+
+Release 14 adds continuous-operation safeguards: bounded/coalesced MQTT state
+publication, explicit readiness, CNI liveness checks, process watchdog recovery
+and priority for ordinary controls. See [release notes](releases/RELEASE-14.md).
