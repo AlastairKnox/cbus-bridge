@@ -995,7 +995,7 @@ class FunctionalHealth:
 
 
 class DeviceInventory:
-    """An explicit, bounded local IDENTIFY survey. No sockets, timers or retries.
+    """Explicit bounded local presence/IDENTIFY surveys. No sockets or timers.
 
     Metrics schedules individual sends on the existing command worker; the CNI
     reader supplies replies independently. No wait for a reply holds that worker.
@@ -1018,6 +1018,8 @@ class DeviceInventory:
         self.last_request_error = None
         self.last_start = float('-inf')
         self.serial = self.version = 0
+        self.presence = {'state':'not_requested'}
+        self.presence_slots = {}
 
     def _change(self):
         self.version += 1
@@ -1046,9 +1048,12 @@ class DeviceInventory:
                 spec = {'units': [self.interface_unit]}
             if spec == 'observed':
                 spec = {'units': sorted(self.observed)[:16]}
+            mode = spec if spec in ('discover', 'sweep') else 'explicit'
             error = None
             units = spec.get('units') if isinstance(spec, dict) and set(spec) == {'units'} else None
-            if (not isinstance(units, list) or not 1 <= len(units) <= 16 or
+            if mode == 'discover': units = []
+            elif mode == 'sweep': units = list(range(255))
+            if mode == 'explicit' and (not isinstance(units, list) or not 1 <= len(units) <= 16 or
                 any(type(u) is not int or not 0 <= u <= 254 for u in units)):
                 error = 'expected_1_to_16_local_unit_addresses_0_to_254'
             elif readonly: error = 'readonly'
@@ -1064,20 +1069,34 @@ class DeviceInventory:
             self.last_start = self.clock()
             self.job = {'id': self.job['id']+1, 'state': 'running',
                         'requested_units': units, 'started_ts': int(self.wall()),
-                        'deadline': self.clock()+600}
+                        'deadline': self.clock()+(3600 if mode != 'explicit' else 600),
+                        'mode':mode, 'phase':'presence' if mode == 'discover' else 'identifying'}
             self.tasks.clear(); self.pending = self.reserved = None
-            for unit in units:
-                self.rows[unit] = {'unit':unit, 'outcome':'pending', 'scan_id':self.job['id'],
-                                   'attempt_ts':int(self.wall()), 'attributes':{}}
-                self.tasks.append((unit,1))
+            self.presence_slots.clear()
+            self.presence = {'state':'queued' if mode == 'discover' else 'not_requested',
+                             'scan_id':self.job['id'], 'covered_slots':0, 'reported_units':[]}
+            if mode == 'discover':
+                self.tasks.append((None,None))
+            else:
+                self._prepare_units(units)
             self.last_request_error = None
             self.diagnostics.bump('inventory_surveys_started_total'); self._change()
             return True
+
+    def _prepare_units(self, units):
+        self.job['requested_units'] = list(units)
+        for unit in units:
+            self.rows[unit] = {'unit':unit, 'outcome':'pending', 'scan_id':self.job['id'],
+                               'attempt_ts':int(self.wall()), 'attributes':{}}
+            self.tasks.append((unit,1))
 
     def cancel(self, reason='connection_lost'):
         with self.lock:
             if self.job['state'] == 'running':
                 self.job['state'] = reason
+                self.job['phase'] = 'stopped'
+                if self.presence.get('state') in ('queued','waiting'):
+                    self.presence['state'] = reason
                 self.last_start = self.clock()
                 self.job['finished_ts'] = int(self.wall())
                 for unit in self.job['requested_units']:
@@ -1111,7 +1130,11 @@ class DeviceInventory:
             if self.job['state'] != 'running': return None
             if now >= self.job['deadline']:
                 self.cancel('survey_deadline'); return None
-            if self.pending and now >= self.pending['sent_at']+3:
+            if self.pending and self.pending.get('kind') == 'presence' and now >= self.pending['sent_at']+10:
+                self.presence['state'] = 'incomplete' if self.presence_slots else 'no_reply'
+                self.diagnostics.bump('inventory_presence_timeouts_total')
+                self.cancel('discovery_' + self.presence['state']); return None
+            if self.pending and self.pending.get('kind') != 'presence' and now >= self.pending['sent_at']+3:
                 self._result(self.pending)
                 self.diagnostics.bump('inventory_query_timeouts_total')
                 self.pending = None
@@ -1119,13 +1142,15 @@ class DeviceInventory:
                 self.reserved = None
             if self.pending or self.reserved: return None
             if not self.tasks:
-                self.job['state'] = 'complete'; self.job['finished_ts'] = int(self.wall())
+                self.job['state'] = 'complete'; self.job['phase'] = 'complete'
+                self.job['finished_ts'] = int(self.wall())
                 self.last_start = self.clock()
                 self._change(); return None
             unit, attr = self.tasks[0]
             self.serial += 1
             self.reserved = {'token':self.serial, 'job':self.job['id'], 'unit':unit,
-                             'attribute':attr, 'destination':self.interface_unit, 'queued_at':now}
+                             'attribute':attr, 'destination':self.interface_unit, 'queued_at':now,
+                             'kind':'presence' if unit is None else 'identity'}
             return dict(self.reserved)
 
     def release(self, token):
@@ -1134,7 +1159,7 @@ class DeviceInventory:
                 self.reserved = None
 
     def transmit(self, token, send):
-        from .cni_protocol import build_identity_request
+        from .cni_protocol import build_identity_request, build_presence_request
         with self.lock:
             if (not self.reserved or self.reserved['token'] != token['token'] or
                 self.job['state'] != 'running' or token['job'] != self.job['id'] or
@@ -1142,26 +1167,66 @@ class DeviceInventory:
                 return False
             self.tasks.popleft(); self.reserved = None
             self.pending = {**token, 'sent_at':self.clock()}
+            if token.get('kind') == 'presence':
+                self.presence['state'] = 'waiting'
+                self.presence['sent_ts'] = int(self.wall())
             try:
-                send(build_identity_request(token['unit'],token['attribute']))
+                send(build_presence_request() if token.get('kind') == 'presence' else
+                     build_identity_request(token['unit'],token['attribute']))
             except Exception:
                 self.cancel('send_failed')
                 self.diagnostics.bump('inventory_send_failures_total')
                 raise
-            self.diagnostics.tx('inventory_identify_request', unit=token['unit'], attribute=token['attribute'])
+            self.diagnostics.tx('inventory_presence_request' if token.get('kind') == 'presence' else
+                                'inventory_identify_request', unit=token['unit'], attribute=token['attribute'])
             self.diagnostics.bump('inventory_queries_sent_total'); self._change()
             return True
 
     def receive(self, reply):
         with self.lock:
             p = self.pending
-            if (not p or self.job['state'] != 'running' or
+            if (not p or p.get('kind') == 'presence' or self.job['state'] != 'running' or
                 self.clock() >= p['sent_at']+3 or self.clock() >= self.job['deadline'] or
                 (reply.unit,reply.destination,reply.attribute) != (p['unit'],p['destination'],p['attribute'])):
                 self.diagnostics.bump('inventory_unmatched_replies_total'); return False
             self.pending = None
             self._result(p,reply.value)
             self.diagnostics.bump('inventory_replies_matched_total')
+            return True
+
+    def receive_presence(self, reply):
+        with self.lock:
+            p = self.pending
+            if (reply.app != 0xFF or not p or p.get('kind') != 'presence' or
+                    self.job['state'] != 'running' or self.clock() >= p['sent_at']+10 or
+                    self.clock() >= self.job['deadline']):
+                self.diagnostics.bump('inventory_unmatched_presence_total'); return False
+            # Validate entire fragment before changing coverage. No fixed fragment
+            # sizes/order are assumed, and a partial report can never prove absence.
+            if not reply.states or any(type(u) is not int or not 0 <= u <= 255 or
+                    state not in ('absent','on','off','error') for u,state in reply.states.items()):
+                return False
+            if any(u in self.presence_slots and self.presence_slots[u] != state
+                   for u,state in reply.states.items()):
+                self.presence['state'] = 'conflict'
+                self.diagnostics.bump('inventory_presence_conflicts_total')
+                self.cancel('discovery_conflict'); return False
+            self.presence_slots.update(reply.states)
+            units = sorted(u for u,state in self.presence_slots.items() if u < 255 and state != 'absent')
+            self.presence.update(covered_slots=len(self.presence_slots), reported_units=units,
+                                 ambiguous_units=sorted(u for u,state in self.presence_slots.items()
+                                                        if u < 255 and state == 'error'),
+                                 address_255_reported=self.presence_slots.get(255,'absent') != 'absent')
+            if len(self.presence_slots) == 256:
+                self.presence['state'] = 'complete'
+                self.presence['completed_ts'] = int(self.wall())
+                known = (self.observed | {u for u,row in self.rows.items() if row.get('type')} |
+                         ({self.interface_unit} if self.interface_unit is not None else set()))
+                self.presence['known_units_not_reported'] = sorted(known - set(units))
+                self.pending = None
+                self.job['phase'] = 'identifying'
+                self._prepare_units(units)
+            self.diagnostics.bump('inventory_presence_fragments_total'); self._change()
             return True
 
     def revision(self):
@@ -1172,9 +1237,13 @@ class DeviceInventory:
         import copy
         with self.lock:
             job = {k:v for k,v in self.job.items() if k != 'deadline'}
-            return {'schema':1, 'scope':'local_explicit_identity_survey', 'version':self.version,
+            job['units_total'] = len(self.job['requested_units'])
+            job['units_finished'] = sum(self.rows[u]['outcome'] != 'pending'
+                                        for u in self.job['requested_units'])
+            return {'schema':1, 'scope':'local_explicit_device_survey', 'version':self.version,
                     'bridge_start_ts':self.bridge_start_ts,
                     'interface_unit':self.interface_unit, 'observed_units':sorted(self.observed),
                     'job':copy.deepcopy(job), 'last_request_error':self.last_request_error,
-                    'pending':{k:self.pending[k] for k in ('unit','attribute')} if self.pending else None,
+                    'presence':copy.deepcopy(self.presence),
+                    'pending':{k:self.pending[k] for k in ('unit','attribute','kind')} if self.pending else None,
                     'devices':copy.deepcopy([self.rows[u] for u in sorted(self.rows)])}

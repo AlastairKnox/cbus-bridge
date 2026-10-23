@@ -1,4 +1,8 @@
-# On-demand device inventory trial (Release 16)
+# On-demand device identity trial (Release 16; retained in Release 17)
+
+Release 17 also adds presence discovery and an explicit full-address sweep; see
+[Device discovery](DEVICE-DISCOVERY.md). The commands below still select small
+identity trials; their 16-address limit remains unchanged.
 
 This release adds local unicast IDENTIFY reads for manufacturer (attribute 0),
 unit type (1), and firmware (2). It does not query voltage/errors yet, write device

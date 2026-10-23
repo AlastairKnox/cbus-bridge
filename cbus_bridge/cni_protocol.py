@@ -163,6 +163,16 @@ class IdentityReply:
     value: str
 
 
+def build_presence_request():
+    """SIUG 4.2.9.2: switched status on master application FF, from slot zero.
+
+    This reads unit presence; it is not a lighting ON/ramp command or a change
+    to the interface's monitored application configuration.
+    """
+    raw = bytes((0x05, 0xFF, 0x00, 0x7A, 0xFF, 0x00))
+    return (raw + bytes((-sum(raw) & 255,))).hex().upper()
+
+
 def build_identity_request(unit, attribute):
     """SIUG 4.2.9.1/7.2: local unicast IDENTIFY only; never RESET/STORE."""
     if type(unit) is not int or not 0 <= unit <= 254:
@@ -205,9 +215,11 @@ def diagnose_frame(hexline: str) -> str:
     if identity:
         return "identity" if parse_identity_reply(hexline) else "malformed"
     if binary:
-        if len(b) > 1 and b[1] != 0x38:
+        if len(b) > 1 and b[1] not in (0x38, 0xFF):
             return "unsupported"
-        return "binary_status" if parse_binary_status_reply(hexline) else "malformed"
+        if not parse_binary_status_reply(hexline):
+            return "malformed"
+        return "presence" if b[1] == 0xFF else "binary_status"
     if len(b) > 2 and b[2] != 0x38:
         return "unsupported"
     if b[0] >= 0xE0:

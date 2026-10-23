@@ -1049,6 +1049,16 @@ class CbusMqttBridge:
                                        attribute=identity.attribute, matched=matched)
                 continue
 
+            presence = parse_binary_status_reply(norm)
+            if presence and presence.app == 0xFF:
+                self._valid_rx()
+                matched = self.inventory.receive_presence(presence)
+                self.diagnostics.bump('rx_presence_total')
+                self.diagnostics.event('inventory_presence_report', 'RX',
+                                       start_group=presence.start_group,
+                                       slots=len(presence.states), matched=matched)
+                continue
+
             category = diagnose_frame(norm)
             self.diagnostics.bump("rx_" + category + "_total")
             if category == 'unsupported':

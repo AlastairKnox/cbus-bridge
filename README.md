@@ -52,3 +52,7 @@ priority and resumes fade acquisition after ordinary controls. See
 Release 16 adds an explicit device identity survey trial, with no automatic scan.
 See [device inventory](docs/DEVICE-INVENTORY.md) for the one-unit CNI trial and
 [release notes](releases/RELEASE-16.md) for pacing, validation and deployment.
+
+Release 17 adds on-demand flat-network presence discovery and an explicit paced
+address-sweep fallback. See [device discovery](docs/DEVICE-DISCOVERY.md) for commands,
+progress, coverage limits and acceptance; existing identity-trial commands remain.

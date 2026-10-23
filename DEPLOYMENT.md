@@ -145,3 +145,10 @@ Installation sends no new inventory query automatically. Follow
 `docs/DEVICE-INVENTORY.md` to listen to MQTT results and deliberately request the
 CNI-only identity trial. Keep the backup and saved rollback helper. No device
 parameters or latched errors are changed by the inventory queries.
+
+## Flat-network discovery (Release 17)
+
+Use the same exact-commit check/apply and rollback workflow; no HA restart is needed.
+After normal lighting acceptance, follow docs/DEVICE-DISCOVERY.md to request a
+presence-based survey. Installation does not launch discovery. Missing/partial
+presence stops explicitly; an address sweep requires its own deliberate command.
