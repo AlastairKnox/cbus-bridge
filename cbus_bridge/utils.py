@@ -995,7 +995,9 @@ class FunctionalHealth:
 
 
 class DeviceInventory:
-    """Explicit bounded local presence/identity/health surveys. No sockets or timers.
+    """Bounded local presence/identity/health surveys and configured monitoring.
+
+    No sockets or timers.
 
     Metrics schedules individual sends on the existing command worker; the CNI
     reader supplies replies independently. No wait for a reply holds that worker.
@@ -1036,7 +1038,7 @@ class DeviceInventory:
                 if self.interface_unit != unit:
                     self.interface_unit = unit; self._change()
 
-    def request(self, spec, ready, readonly=False):
+    def request(self, spec, ready, readonly=False, *, monitor=False):
         with self.lock:
             if spec == 'cancel':
                 self.cancel('cancelled'); return True
@@ -1063,7 +1065,7 @@ class DeviceInventory:
                 any(type(u) is not int or not 0 <= u <= 254 for u in units)):
                 error = 'expected_1_to_16_local_unit_addresses_0_to_254'
             elif mode == 'health' and (not isinstance(units, list) or not 1 <= len(units) <=
-                    (16 if isinstance(spec, dict) else 255) or
+                    (255 if monitor or not isinstance(spec, dict) else 16) or
                     any(type(u) is not int or not 0 <= u <= 254 for u in units)):
                 error = 'expected_known_inventory_or_1_to_16_explicit_health_units'
             elif readonly: error = 'readonly'
@@ -1319,3 +1321,142 @@ class DeviceInventory:
                     'presence':copy.deepcopy(self.presence),
                     'pending':{k:self.pending[k] for k in ('unit','attribute','kind')} if self.pending else None,
                     'devices':copy.deepcopy([self.rows[u] for u in sorted(self.rows)])}
+
+
+class DeviceMonitor:
+    """Configured, bounded monitoring via DeviceInventory's existing worker.
+
+    No sockets, timers or persistent mutable state. The site's reviewed roster
+    and baseline are an ordinary JSON file included in full application backups.
+    """
+    def __init__(self, inventory, config=None, clock=None, wall=None):
+        import threading, time
+        self.lock = threading.RLock()
+        self.inventory = inventory
+        self.clock, self.wall = clock or time.monotonic, wall or time.time
+        self.config = self.validate(config) if config is not None else None
+        self.devices = {d['unit']:d for d in self.config['devices']} if self.config else {}
+        self.supported = [u for u,d in self.devices.items() if d['capability'] in ('full','voltage')]
+        self.period = self.config['refresh_seconds'] if self.config else 900
+        # The inventory manager retains its 30-second inter-job cooldown.
+        self.spacing = max(31., self.period / max(1,len(self.supported)))
+        self.due = {u:self.clock()+i*self.spacing for i,u in enumerate(self.supported)}
+        self.next_launch = self.clock()+10
+        self.last_refresh = float('-inf')
+        self.refresh_pending = False
+        self.last_scan, self.attempts, self.good, self.good_at = {}, {}, {}, {}
+        self.valid_session = set()
+        self.next_publish = 0
+
+    @staticmethod
+    def validate(config):
+        import copy
+        if not isinstance(config,dict) or set(config) != {'schema','refresh_seconds','stale_seconds','devices'}:
+            raise ValueError('Invalid device monitor configuration keys')
+        if config['schema'] != 1 or type(config['schema']) is not int:
+            raise ValueError('Invalid device monitor schema')
+        if (type(config['refresh_seconds']) is not int or not 900 <= config['refresh_seconds'] <= 86400 or
+                type(config['stale_seconds']) is not int or
+                not config['refresh_seconds']*2 <= config['stale_seconds'] <= 604800):
+            raise ValueError('Invalid refresh/staleness periods')
+        rows=config['devices']
+        if not isinstance(rows,list) or not 1 <= len(rows) <= 255:
+            raise ValueError('Expected 1..255 configured devices')
+        seen=set()
+        for d in rows:
+            if (not isinstance(d,dict) or set(d) != {'unit','type','manufacturer','firmware','capability','baseline_errors'} or
+                    type(d['unit']) is not int or not 0 <= d['unit'] <= 254 or d['unit'] in seen or
+                    d['capability'] not in ('full','voltage','unavailable') or
+                    type(d['baseline_errors']) is not int or not 0 <= d['baseline_errors'] <= 255 or
+                    any(not isinstance(d[k],str) or not 1 <= len(d[k]) <= 64 or
+                        any(ord(c)<32 or ord(c)>126 for c in d[k]) for k in ('type','manufacturer','firmware'))):
+                raise ValueError('Invalid or duplicate device roster entry')
+            seen.add(d['unit'])
+        supported=sum(d['capability'] != 'unavailable' for d in rows)
+        if config['stale_seconds'] < 2*max(config['refresh_seconds'],31*supported):
+            raise ValueError('Staleness must allow two full refresh cycles')
+        result=copy.deepcopy(config);result['devices'].sort(key=lambda d:d['unit'])
+        return result
+
+    @classmethod
+    def from_file(cls, inventory, path):
+        import json
+        from pathlib import Path
+        p=Path(path)
+        if not p.exists(): return cls(inventory)
+        if p.stat().st_size > 131072: raise ValueError('Device monitor configuration too large')
+        return cls(inventory,json.loads(p.read_text()))
+
+    def refresh(self):
+        with self.lock:
+            if not self.supported or self.clock() < self.last_refresh+30: return False
+            self.last_refresh=self.clock();self.refresh_pending=True
+            return True
+
+    def tick(self, ready, readonly=False):
+        import copy
+        with self.lock:
+            if not self.config: return
+            now=self.clock()
+            if not ready:
+                self.valid_session.clear()
+            view=self.inventory.snapshot()
+            for row in view['devices']:
+                u=row['unit'];h=row.get('health',{})
+                if u not in self.devices or not h or h.get('outcome') == 'pending': continue
+                if self.last_scan.get(u) == h['scan_id']: continue
+                self.last_scan[u]=h['scan_id'];self.attempts[u]=copy.deepcopy(h)
+                if h['outcome'] in ('reply','voltage_only'):
+                    self.good[u]=copy.deepcopy(h);self.good_at[u]=now
+                    if ready: self.valid_session.add(u)
+            if (not self.supported or readonly or not ready or now < self.next_launch or
+                    view['interface_unit'] is None or view['job']['state'] == 'running' or
+                    now < self.inventory.last_start+30):
+                return
+            units=self.supported if self.refresh_pending else sorted(
+                (u for u in self.supported if now >= self.due[u]),key=lambda u:(self.due[u],u))[:1]
+            if not units: return
+            if self.inventory.request({'health':units},ready,readonly,monitor=True):
+                for u in units: self.due[u]=now+self.period
+                self.next_launch=now+self.spacing
+                self.refresh_pending=False
+
+    def snapshot(self):
+        with self.lock:
+            result={}
+            for u,d in self.devices.items():
+                h=self.good.get(u,{});attempt=self.attempts.get(u,{})
+                age=max(0,int(self.clock()-self.good_at[u])) if h else None
+                if d['capability'] == 'unavailable': status='diagnostics_unavailable'
+                elif attempt.get('outcome') not in (None,'reply','voltage_only'): status=attempt['outcome']
+                elif u not in self.valid_session: status='awaiting_reading'
+                elif age is None or age >= self.config['stale_seconds']: status='stale'
+                else: status='fresh'
+                row={'schema':1,'unit':u,'type':d['type'],'manufacturer':d['manufacturer'],'firmware':d['firmware'],
+                     'capability':d['capability'],'status':status,'observed_ts':h.get('observed_ts'),
+                     'age_s':age,'last_attempt_ts':attempt.get('completed_ts'),
+                     'bridge_start_ts':self.inventory.bridge_start_ts,
+                     'diagnostics_available':h.get('diagnostics_available',False)}
+                for field in ('voltage_v','voltage_low','voltage_marginal','learn_mode','latched_errors','latched_errors_raw'):
+                    if field in h: row[field]=h[field]
+                if h.get('diagnostics_available'):
+                    from .cni_protocol import DEVICE_ERROR_FLAGS
+                    row['new_error_bits']=h['latched_errors_raw'] & ~d['baseline_errors'] & 255
+                    row['new_errors']=[name for bit,name in enumerate(DEVICE_ERROR_FLAGS)
+                                       if row['new_error_bits'] & (1 << bit)]
+                result[u]=row
+            return result
+
+    def publish(self, publisher):
+        import json
+        with self.lock:
+            if self.clock() < self.next_publish: return
+            self.next_publish=self.clock()+30
+            states=self.snapshot()
+            publisher.publish('cbus/bridge/device_monitor',json.dumps({
+                'schema':1,'enabled':bool(self.config),'devices':len(self.devices),'polled_devices':len(self.supported),
+                'refresh_pending':self.refresh_pending,'refresh_seconds':self.period,
+                'cycle_seconds_minimum':max(self.period,int(self.spacing*len(self.supported))),
+                'fresh':sum(v['status']=='fresh' for v in states.values())}),qos=0,retain=False)
+            for u,row in states.items():
+                publisher.publish(f'cbus/bridge/devices/{u}/state',json.dumps(row,separators=(',',':')),qos=0,retain=False)

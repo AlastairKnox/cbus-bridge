@@ -64,3 +64,7 @@ commands, historical-reading semantics and limits. No periodic polling is enable
 Release 19 adds one voltage-only fallback read for units without a usable health
 summary, with explicit partial/unknown results and bounded alternative replies.
 See [health compatibility](docs/DEVICE-HEALTH-COMPATIBILITY.md) for the trial.
+
+Release 20 adds opt-in device monitoring with a reviewed roster and an offline HA
+package/dashboard generator. See [device monitoring](docs/DEVICE-MONITORING.md) for
+15-minute paced reads, freshness/baseline semantics, Recorder and installation.

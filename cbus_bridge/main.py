@@ -15,7 +15,7 @@ from .ha_profiles import load_ha_mqtt_profiles
 from .cni_connection import CniConnection
 from .bridge import CbusMqttBridge
 from .utils import BridgeDiagnostics, CommandWorker, command_requires_duration_wait
-from .utils import instance_lock, LatestPublisher, FunctionalHealth
+from .utils import instance_lock, LatestPublisher, FunctionalHealth, DeviceMonitor
 
 LOG = logging.getLogger("cbus_bridge")
 
@@ -75,6 +75,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     ap.add_argument("--ha-config", required=True,
                     help="Path to file containing your HA mqtt: YAML (or just the mqtt: block).")
+
+    ap.add_argument("--device-monitor-config", default=None,
+                    help="Optional reviewed device roster; missing/invalid config disables device polling.")
 
     ap.add_argument("--init", action="store_true", help="Send CNI init sequence.")
     ap.add_argument("--monitor", action=argparse.BooleanOptionalAction, default=False,
@@ -190,6 +193,13 @@ def run(argv=None) -> int:
     publisher = LatestPublisher(mc, diagnostics)
     bridge = CbusMqttBridge(cni=cni, mqtt_client=publisher, profiles=profiles, readonly=readonly,
                             diagnostics=diagnostics, ramp_readback_every=args.ramp_readback_every)
+
+    try:
+        device_monitor = (DeviceMonitor.from_file(bridge.inventory,args.device_monitor_config)
+                          if args.device_monitor_config else DeviceMonitor(bridge.inventory))
+    except (OSError,ValueError,TypeError,RecursionError) as exc:
+        LOG.error('Device monitoring disabled: %s', type(exc).__name__)
+        device_monitor = DeviceMonitor(bridge.inventory)
 
     worker = CommandWorker(diagnostics, cancel=bridge.cancel_session)
     health = FunctionalHealth(timeout=60)
@@ -351,6 +361,9 @@ def run(argv=None) -> int:
             if isinstance(request, dict) and set(request) == {'inventory'}:
                 bridge.request_inventory(request['inventory'],worker)
                 return
+            if isinstance(request,dict) and set(request) == {'device_monitor'}:
+                if request['device_monitor'] == 'refresh': device_monitor.refresh()
+                return
             text = msg.payload.decode("utf-8", errors="ignore").strip().lower()
             mode = ("full" if text in ("resync_full", "full") else
                     args.resync_mode if text in ("resync", "sync", "status") else None)
@@ -428,7 +441,9 @@ def run(argv=None) -> int:
                                       qos=1, retain=True)
                 bridge.queue_health_probe(worker)
                 bridge.queue_ramp_readback(worker)
+                device_monitor.tick(worker.snapshot()['ready'],readonly)
                 bridge.queue_inventory(worker)
+                if mqtt_up.is_set(): device_monitor.publish(publisher)
                 if inventory_version != bridge.inventory.revision():
                     inventory = bridge.inventory.snapshot()
                     info = publisher.publish('cbus/bridge/inventory', json.dumps(inventory,separators=(',',':')), qos=1, retain=True)

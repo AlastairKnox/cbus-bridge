@@ -13,6 +13,7 @@ case "${CNI_MONITOR:-1}" in
 esac
 
 exec python /opt/cbus_bridge/run_bridge.py \
+  --device-monitor-config "${CBUS_DEVICE_MONITOR_CONFIG:-/opt/cbus_bridge/device_monitor.json}" \
   --cni-host "${CNI_HOST}" \
   --cni-port "${CNI_PRIMARY_PORT}" \
   --mqtt-host "${MQTT_HOST}" \

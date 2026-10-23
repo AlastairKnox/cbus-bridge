@@ -13,3 +13,6 @@ __pycache__/
 # Preserved working copies from the live server
 /cbus_bridge/bridge.py.030626
 /cbus_bridge/bridge.py.new
+
+# Reviewed site-specific monitoring roster
+device_monitor.json

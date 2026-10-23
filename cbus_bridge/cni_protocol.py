@@ -200,6 +200,11 @@ def parse_identity_reply(hexline):
     return IdentityReply(b[1], b[2], b[5], text.decode('ascii').strip())
 
 
+DEVICE_ERROR_FLAGS = ('power_on_reset', 'internal_stack_overflow', 'communications_tx_error',
+                      'micro_reset', 'eeprom_data_error', 'eeprom_checksum_error',
+                      'eeprom_write_error', 'installation_mmi_error')
+
+
 @dataclass(frozen=True)
 class DeviceHealthReply:
     unit: int
@@ -229,16 +234,13 @@ def parse_device_health_reply(hexline):
         return None
     data = b[6:-1]
     common, errors = data[10:12]
-    names = ('power_on_reset', 'internal_stack_overflow', 'communications_tx_error',
-             'micro_reset', 'eeprom_data_error', 'eeprom_checksum_error',
-             'eeprom_write_error', 'installation_mmi_error')
     value = {'data_hex':data.hex().upper(), 'voltage_raw':data[9],
              'voltage_v':round(data[9] / 6.375, 3),
              'common_status_raw':common, 'latched_errors_raw':errors,
              'output_unit':bool(common & 1), 'checksum_alarm_enabled':bool(common & 2),
              'voltage_marginal':bool(common & 32), 'voltage_low':bool(common & 64),
              'learn_mode':bool(common & 128),
-             'latched_errors':[name for bit,name in enumerate(names) if errors & (1 << bit)]}
+             'latched_errors':[name for bit,name in enumerate(DEVICE_ERROR_FLAGS) if errors & (1 << bit)]}
     return DeviceHealthReply(b[1], b[2], 4, value)
 
 

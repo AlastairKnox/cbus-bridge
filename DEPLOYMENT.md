@@ -168,3 +168,12 @@ After normal HA, wall-switch and fade acceptance, use the three-unit action in
 tries one voltage-only read if its summary read gets no usable response. Allow
 extra time for those units; missing data does not diagnose a hardware fault.
 No HA changes/restart are needed. Keep the existing saved rollback helper.
+
+## Release 20 device monitoring and HA
+
+Read [device monitoring](docs/DEVICE-MONITORING.md) before enabling it. The new code
+alone does not poll devices without the reviewed /opt/cbus_bridge/device_monitor.json
+roster. That default path is inside normal whole-application backup coverage.
+The prepared HA package/dashboard are installed separately after bridge acceptance;
+run HA's configuration check and restart HA to load entities and Recorder exclusions.
+Keep the dashboard backup: bridge rollback does not undo HA changes.
