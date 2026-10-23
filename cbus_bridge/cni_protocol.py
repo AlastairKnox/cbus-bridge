@@ -242,19 +242,64 @@ def parse_device_health_reply(hexline):
     return DeviceHealthReply(b[1], b[2], 4, value)
 
 
+def build_device_voltage_request(unit):
+    """SIUG 7.2 IDENTIFY 07: read voltage text only, no parameter changes."""
+    if type(unit) is not int or not 0 <= unit <= 254:
+        raise ValueError('Unit must be 0..254; broadcast is forbidden')
+    raw = bytes((0x06, unit, 0x00, 0x21, 0x07))
+    return (raw + bytes((-sum(raw) & 255,))).hex().upper()
+
+
+def parse_device_voltage_reply(hexline):
+    """Local IDENTIFY 07: exactly five ASCII bytes, e.g. 28.7V."""
+    b = _checked_frame(hexline)
+    if (b is None or len(b) != 12 or b[0] != 0x86 or b[1] == 255 or
+            b[2] == 255 or b[3] != 0 or b[4:6] != bytes((0x86, 7)) or
+            re.fullmatch(rb'[0-9]{2}\.[0-9]V', b[6:-1]) is None):
+        return None
+    data = b[6:-1]
+    value = {'voltage_v':int(data[:2]) + (data[3] - 48) / 10,
+             'voltage_text':data.decode('ascii'), 'voltage_data_hex':data.hex().upper()}
+    return DeviceHealthReply(b[1], b[2], 7, value)
+
+
+@dataclass(frozen=True)
+class DeviceHealthEvidence:
+    unit: int
+    destination: int
+    attribute: int
+    raw_hex: str
+
+
+def parse_device_health_evidence(hexline):
+    """Bounded, checksum-valid local CAL envelope; never decode unknown data.
+
+    For correlation/debugging only. The caller must match an outstanding read.
+    At most the first matching alternative per read is retained by inventory.
+    """
+    b = _checked_frame(hexline)
+    if (b is None or not 7 <= len(b) <= 25 or b[0] != 0x86 or
+            b[1] == 255 or b[2] == 255 or b[3] != 0 or
+            (b[4] & 0xE0) != 0x80 or (b[4] & 31) != len(b) - 6 or b[5] not in (4,7)):
+        return None
+    return DeviceHealthEvidence(b[1], b[2], b[5], b.hex().upper())
+
+
 def diagnose_frame(hexline: str) -> str:
     """Classify supported envelopes without labelling unrelated traffic corrupt."""
     if not hexline or len(hexline) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", hexline):
         return "nonhex"
     b = bytes.fromhex(hexline)
     identity = len(b) >= 6 and b[0] == 0x86 and b[3] == 0 and b[4] == 0x89 and b[5] in (0, 1, 2)
-    health = len(b) >= 6 and b[0] == 0x86 and b[3] == 0 and (b[4] & 0xE0) == 0x80 and b[5] == 4
+    health = len(b) >= 6 and b[0] == 0x86 and b[3] == 0 and (b[4] & 0xE0) == 0x80 and b[5] in (4,7)
     binary = 0xC0 <= b[0] < 0xE0
     supported = identity or health or binary or b[0] == 0x05 or (b[0] >= 0xE0 and len(b) > 1 and b[1] in (0x07, 0x47))
     if not supported:
         return "unsupported"
     if sum(b) % 256:
         return "checksum_failure"
+    if health and b[5] == 7:
+        return "device_voltage" if parse_device_voltage_reply(hexline) else "malformed"
     if health:
         return "device_health" if parse_device_health_reply(hexline) else "malformed"
     if identity:

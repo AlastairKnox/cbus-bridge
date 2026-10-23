@@ -60,3 +60,7 @@ progress, coverage limits and acceptance; existing identity-trial commands remai
 Release 18 adds on-demand device voltage and latched-diagnostics reads. See
 [device health](docs/DEVICE-HEALTH.md) for the CNI-only trial, batch/full-inventory
 commands, historical-reading semantics and limits. No periodic polling is enabled.
+
+Release 19 adds one voltage-only fallback read for units without a usable health
+summary, with explicit partial/unknown results and bounded alternative replies.
+See [health compatibility](docs/DEVICE-HEALTH-COMPATIBILITY.md) for the trial.

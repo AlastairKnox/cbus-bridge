@@ -160,3 +160,11 @@ to read unit 2 first. No HA changes or restart are required. The cache starts em
 following deployment: use explicit known addresses for the first trial, or run
 presence discovery before a full cached-inventory health survey. Share the final
 JSON before adding automatic polling or HA health entities. Normal rollback applies.
+
+## Release 19 compatibility trial
+
+After normal HA, wall-switch and fade acceptance, use the three-unit action in
+[health compatibility](docs/DEVICE-HEALTH-COMPATIBILITY.md). The health command now
+tries one voltage-only read if its summary read gets no usable response. Allow
+extra time for those units; missing data does not diagnose a hardware fault.
+No HA changes/restart are needed. Keep the existing saved rollback helper.

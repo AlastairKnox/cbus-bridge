@@ -36,9 +36,9 @@ class HealthCni(Cni):
                     raw=bytes.fromhex(data.decode());assert sum(raw)%256==0
                     if raw[0]==6:
                         assert len(raw)==6 and raw[2:4]==b'\x00\x21'
-                        unit,attr=raw[1],raw[4];assert unit in (20,21,22) and attr==4
+                        unit,attr=raw[1],raw[4];assert unit in (20,21,22) and attr in (4,7)
                         self.queries.append((unit,attr,time.monotonic()))
-                        if self.answer and unit!=21:
+                        if self.answer and unit!=21 and attr==4:
                             # Wrong destination and malformed count must not complete a read.
                             self.send(health_frame(unit=unit,dest=98).encode()+b'\r\n',s)
                             self.send(health_frame(unit=unit,data=bytes(11)).encode()+b'\r\n',s)
@@ -103,9 +103,9 @@ if __name__=='__main__':
                 assert rows[22]['health']['voltage_v']==0
                 assert rows[22]['health']['voltage_low'] and rows[22]['health']['voltage_marginal']
                 assert rows[22]['health']['latched_errors']==['communications_tx_error']
-                assert len(cni.queries)==3
+                assert len(cni.queries)==4
                 assert all(b[2]-a[2]>=2.95 for a,b in zip(cni.queries,cni.queries[1:]))
-                assert all(a==4 for u,a,t in cni.queries)
+                assert [(u,a) for u,a,t in cni.queries]==[(20,4),(21,4),(21,7),(22,4)]
                 out['fragmented_valid_replies_and_unknown_on_timeout']='passed'
                 out['retained_health_request_ignored']='passed'
                 out['shared_three_second_budget_readonly_opcode']='passed'

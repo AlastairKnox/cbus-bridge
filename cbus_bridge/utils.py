@@ -1120,7 +1120,13 @@ class DeviceInventory:
                 for unit in self.job['requested_units']:
                     row = self.rows[unit]
                     target = row['health'] if self.job['mode'] == 'health' else row
-                    if target['outcome'] == 'pending': target['outcome'] = reason
+                    if target['outcome'] == 'pending':
+                        target['outcome'] = reason
+                        if self.job['mode'] == 'health':
+                            target['completed_ts'] = int(self.wall())
+                            for read in target.get('reads',{}).values():
+                                if read['outcome'] == 'pending':
+                                    read.update(outcome=reason, completed_ts=int(self.wall()))
                 self.diagnostics.bump('inventory_surveys_cancelled_total'); self._change()
             self.tasks.clear(); self.pending = self.reserved = None
             if reason == 'connection_lost':
@@ -1129,11 +1135,26 @@ class DeviceInventory:
     def _result(self, token, value=None):
         unit, attr = token['unit'], token['attribute']
         row = self.rows[unit]
-        if attr == 4:
-            row['health'].update(outcome='reply' if value is not None else 'no_reply',
-                                 completed_ts=int(self.wall()))
+        if attr in (4,7):
+            health = row['health']
+            read = health['reads']['summary' if attr == 4 else 'voltage']
+            read.update(outcome='reply' if value is not None else
+                        'unrecognized_reply' if 'reply_hex' in read else 'no_reply',
+                        completed_ts=int(self.wall()))
             if value is not None:
-                row['health'].update(value, observed_ts=int(self.wall()))
+                read['observed_ts'] = int(self.wall())
+                health.update(value, observed_ts=int(self.wall()),
+                              voltage_source='identify_04' if attr == 4 else 'identify_07')
+            if attr == 4 and value is None:
+                # One different documented read, never a retry of the failed one.
+                # It still uses the shared background budget and ramp/queue gates.
+                self.tasks.appendleft((unit,7))
+                self._change(); return
+            health.update(outcome=('reply' if attr == 4 else 'voltage_only') if value is not None else
+                          'unrecognized_reply' if any(r['outcome'] == 'unrecognized_reply'
+                                                       for r in health['reads'].values()) else 'no_reply',
+                          diagnostics_available=attr == 4 and value is not None,
+                          completed_ts=int(self.wall()))
             self._change(); return
         field = self.FIELDS[attr]
         row['attributes'][field] = {'outcome':'reply' if value is not None else 'no_reply',
@@ -1176,7 +1197,7 @@ class DeviceInventory:
             self.serial += 1
             self.reserved = {'token':self.serial, 'job':self.job['id'], 'unit':unit,
                              'attribute':attr, 'destination':self.interface_unit, 'queued_at':now,
-                             'kind':'presence' if unit is None else 'health' if attr == 4 else 'identity'}
+                             'kind':'presence' if unit is None else 'health' if attr in (4,7) else 'identity'}
             return dict(self.reserved)
 
     def release(self, token):
@@ -1185,7 +1206,7 @@ class DeviceInventory:
                 self.reserved = None
 
     def transmit(self, token, send):
-        from .cni_protocol import build_identity_request, build_presence_request, build_device_health_request
+        from .cni_protocol import build_identity_request, build_presence_request, build_device_health_request, build_device_voltage_request
         with self.lock:
             if (not self.reserved or self.reserved['token'] != token['token'] or
                 self.job['state'] != 'running' or token['job'] != self.job['id'] or
@@ -1194,13 +1215,17 @@ class DeviceInventory:
             self.tasks.popleft(); self.reserved = None
             self.pending = {**token, 'sent_at':self.clock()}
             if token.get('kind') == 'health':
-                self.rows[token['unit']]['health']['sent_ts'] = int(self.wall())
+                health = self.rows[token['unit']]['health']
+                health.setdefault('sent_ts', int(self.wall()))
+                health.setdefault('reads', {})['summary' if token['attribute'] == 4 else 'voltage'] = {
+                    'outcome':'pending', 'sent_ts':int(self.wall())}
             if token.get('kind') == 'presence':
                 self.presence['state'] = 'waiting'
                 self.presence['sent_ts'] = int(self.wall())
             try:
                 send(build_presence_request() if token.get('kind') == 'presence' else
-                     build_device_health_request(token['unit']) if token.get('kind') == 'health' else
+                     (build_device_health_request(token['unit']) if token['attribute'] == 4 else
+                      build_device_voltage_request(token['unit'])) if token.get('kind') == 'health' else
                      build_identity_request(token['unit'],token['attribute']))
             except Exception:
                 self.cancel('send_failed')
@@ -1222,6 +1247,22 @@ class DeviceInventory:
             self.pending = None
             self._result(p,reply.value)
             self.diagnostics.bump('inventory_replies_matched_total')
+            return True
+
+    def record_health_evidence(self, reply):
+        """Keep one bounded alternative per active read without accepting its data."""
+        with self.lock:
+            p = self.pending
+            if (not p or p.get('kind') != 'health' or self.job['state'] != 'running' or
+                    self.clock() >= p['sent_at']+3 or self.clock() >= self.job['deadline'] or
+                    (reply.unit,reply.destination,reply.attribute) !=
+                    (p['unit'],p['destination'],p['attribute'])):
+                return False
+            read = self.rows[p['unit']]['health']['reads']['summary' if p['attribute'] == 4 else 'voltage']
+            if 'reply_hex' not in read:
+                read['reply_hex'] = reply.raw_hex
+                read['alternative_observed_ts'] = int(self.wall())
+                self._change()
             return True
 
     def receive_presence(self, reply):

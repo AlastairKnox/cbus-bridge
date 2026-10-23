@@ -1,4 +1,8 @@
-# On-demand device health trial (Release 18)
+# On-demand device health trial (Release 18, extended by Release 19)
+
+Release 19 adds one voltage-only fallback and per-read evidence/outcomes. See
+[health compatibility](DEVICE-HEALTH-COMPATIBILITY.md) for current behavior.
+The single-read/no-retry description below documents the original Release 18 trial.
 
 This release reads IDENTIFY attribute 04 (extended diagnostic summary) from local
 unit addresses. It reuses the existing single CNI connection and inventory worker.

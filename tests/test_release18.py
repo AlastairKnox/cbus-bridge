@@ -72,7 +72,7 @@ class HealthSurveyTests(unittest.TestCase):
         self.i.observe_unit(20);self.assertIsNone(self.i.reserve())
         self.assertFalse(self.i.request('health',True));self.send.assert_not_called()
 
-    def test_explicit_health_one_read_per_unit_preserves_identity(self):
+    def test_explicit_health_preserves_identity_with_bounded_voltage_fallback(self):
         self.i.rows[20]={'unit':20,'type':'DIMDN8','outcome':'identified','attributes':{}}
         self.assertTrue(self.i.request({'health':[20,21,20]},True))
         self.assertEqual(self.i.snapshot()['job']['units_finished'],0)
@@ -80,9 +80,10 @@ class HealthSurveyTests(unittest.TestCase):
         self.assertEqual(self.transmit()['kind'],'health')
         self.assertTrue(self.i.receive(parse_device_health_reply(health_frame())))
         self.assertEqual(self.row()['health']['voltage_v'],32)
-        self.now[0]=3;self.transmit();self.now[0]=6;self.assertIsNone(self.i.reserve())
+        self.now[0]=3;self.transmit();self.now[0]=6;self.transmit()
+        self.now[0]=9;self.assertIsNone(self.i.reserve())
         s=self.i.snapshot();self.assertEqual(s['job']['state'],'complete')
-        self.assertEqual(s['job']['units_finished'],2);self.assertEqual(self.send.call_count,2)
+        self.assertEqual(s['job']['units_finished'],2);self.assertEqual(self.send.call_count,3)
         self.assertEqual(self.row(21)['health']['outcome'],'no_reply')
         self.assertNotIn('voltage_v',self.row(21)['health'])
         self.assertNotIn('observed_ts',self.row(21)['health'])
@@ -117,7 +118,8 @@ class HealthSurveyTests(unittest.TestCase):
                   parse_identity_reply(previous.reply_frame(unit=20))]:
             self.assertFalse(self.i.receive(r))
         self.now[0]=3;self.assertFalse(self.i.receive(parse_device_health_reply(health_frame())))
-        self.i.reserve();self.assertEqual(self.row()['health']['outcome'],'no_reply')
+        self.assertEqual(self.transmit()['attribute'],7)
+        self.now[0]=6;self.i.reserve();self.assertEqual(self.row()['health']['outcome'],'no_reply')
 
     def test_cancel_disconnect_send_failure_and_deadline_invalidate_remaining_reads(self):
         for reason in ('cancelled','connection_lost','send_failed','survey_deadline'):
