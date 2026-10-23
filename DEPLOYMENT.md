@@ -152,3 +152,11 @@ Use the same exact-commit check/apply and rollback workflow; no HA restart is ne
 After normal lighting acceptance, follow docs/DEVICE-DISCOVERY.md to request a
 presence-based survey. Installation does not launch discovery. Missing/partial
 presence stops explicitly; an address sweep requires its own deliberate command.
+
+## Release 18 device health trial
+
+After normal control acceptance, use the [device-health guide](docs/DEVICE-HEALTH.md)
+to read unit 2 first. No HA changes or restart are required. The cache starts empty
+following deployment: use explicit known addresses for the first trial, or run
+presence discovery before a full cached-inventory health survey. Share the final
+JSON before adding automatic polling or HA health entities. Normal rollback applies.

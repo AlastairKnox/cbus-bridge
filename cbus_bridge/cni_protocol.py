@@ -200,18 +200,63 @@ def parse_identity_reply(hexline):
     return IdentityReply(b[1], b[2], b[5], text.decode('ascii').strip())
 
 
+@dataclass(frozen=True)
+class DeviceHealthReply:
+    unit: int
+    destination: int
+    attribute: int
+    value: dict
+
+
+def build_device_health_request(unit):
+    """SIUG 7.2 IDENTIFY 04: read extended diagnostic summary, never clear it."""
+    if type(unit) is not int or not 0 <= unit <= 254:
+        raise ValueError('Unit must be 0..254; broadcast is forbidden')
+    raw = bytes((0x06, unit, 0x00, 0x21, 0x04))
+    return (raw + bytes((-sum(raw) & 255,))).hex().upper()
+
+
+def parse_device_health_reply(hexline):
+    """Strict local long CAL reply: attribute 04, exactly twelve data bytes.
+
+    SIUG 7.2: data offsets 9=voltage ADC, 10=common status, 11=latched
+    errors. The first nine bytes are retained raw, not interpreted as identity.
+    Flags are observations, not proof of a current fault or a healthy bus.
+    """
+    b = _checked_frame(hexline)
+    if (b is None or len(b) != 19 or b[0] != 0x86 or b[1] == 255 or
+            b[2] == 255 or b[3] != 0 or b[4:6] != bytes((0x8D, 4))):
+        return None
+    data = b[6:-1]
+    common, errors = data[10:12]
+    names = ('power_on_reset', 'internal_stack_overflow', 'communications_tx_error',
+             'micro_reset', 'eeprom_data_error', 'eeprom_checksum_error',
+             'eeprom_write_error', 'installation_mmi_error')
+    value = {'data_hex':data.hex().upper(), 'voltage_raw':data[9],
+             'voltage_v':round(data[9] / 6.375, 3),
+             'common_status_raw':common, 'latched_errors_raw':errors,
+             'output_unit':bool(common & 1), 'checksum_alarm_enabled':bool(common & 2),
+             'voltage_marginal':bool(common & 32), 'voltage_low':bool(common & 64),
+             'learn_mode':bool(common & 128),
+             'latched_errors':[name for bit,name in enumerate(names) if errors & (1 << bit)]}
+    return DeviceHealthReply(b[1], b[2], 4, value)
+
+
 def diagnose_frame(hexline: str) -> str:
     """Classify supported envelopes without labelling unrelated traffic corrupt."""
     if not hexline or len(hexline) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", hexline):
         return "nonhex"
     b = bytes.fromhex(hexline)
     identity = len(b) >= 6 and b[0] == 0x86 and b[3] == 0 and b[4] == 0x89 and b[5] in (0, 1, 2)
+    health = len(b) >= 6 and b[0] == 0x86 and b[3] == 0 and (b[4] & 0xE0) == 0x80 and b[5] == 4
     binary = 0xC0 <= b[0] < 0xE0
-    supported = identity or binary or b[0] == 0x05 or (b[0] >= 0xE0 and len(b) > 1 and b[1] in (0x07, 0x47))
+    supported = identity or health or binary or b[0] == 0x05 or (b[0] >= 0xE0 and len(b) > 1 and b[1] in (0x07, 0x47))
     if not supported:
         return "unsupported"
     if sum(b) % 256:
         return "checksum_failure"
+    if health:
+        return "device_health" if parse_device_health_reply(hexline) else "malformed"
     if identity:
         return "identity" if parse_identity_reply(hexline) else "malformed"
     if binary:

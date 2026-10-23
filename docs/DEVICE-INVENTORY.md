@@ -135,3 +135,7 @@ eight-byte ASCII identity attributes are enabled here.
 
 Manufacturer-authored guide (mirror):
 https://manualzz.com/doc/4150831/clipsal-serial-interface-user-guides
+
+Release 18 extends this with explicit read-only diagnostic-summary trials; see
+[device health](DEVICE-HEALTH.md). Identity surveys still issue only attributes 0–2;
+health reads are separately requested and timestamped, with no automatic polling.

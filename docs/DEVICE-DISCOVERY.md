@@ -135,3 +135,7 @@ bridge safeguards; they still require a real-device acceptance trial.
 
 Manufacturer-authored guide (mirror):
 https://manualzz.com/doc/4150831/clipsal-serial-interface-user-guides
+
+After a successful discovery, Release 18 can separately survey voltage and latched
+diagnostic flags for cached typed units. See [device health](DEVICE-HEALTH.md);
+wait for job completion and the 30-second cooldown before starting another survey.

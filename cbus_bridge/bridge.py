@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple, Set, List
 import paho.mqtt.client as mqtt
 
 from .cni_connection import CniConnection
-from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame, RAMP_CODES, parse_binary_status_reply, parse_interface_reply, parse_identity_reply
+from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame, RAMP_CODES, parse_binary_status_reply, parse_interface_reply, parse_identity_reply, parse_device_health_reply
 from .ha_profiles import GroupProfile
 from .utils import (
     BridgeDiagnostics,
@@ -1047,6 +1047,15 @@ class CbusMqttBridge:
                 self.diagnostics.bump('rx_identity_total')
                 self.diagnostics.event('inventory_identity_reply', 'RX', unit=identity.unit,
                                        attribute=identity.attribute, matched=matched)
+                continue
+
+            health = parse_device_health_reply(norm)
+            if health:
+                self._valid_rx()
+                matched = self.inventory.receive(health)
+                self.diagnostics.bump('rx_device_health_total')
+                self.diagnostics.event('inventory_health_reply', 'RX', unit=health.unit,
+                                       attribute=health.attribute, matched=matched)
                 continue
 
             presence = parse_binary_status_reply(norm)

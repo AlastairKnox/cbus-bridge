@@ -995,7 +995,7 @@ class FunctionalHealth:
 
 
 class DeviceInventory:
-    """Explicit bounded local presence/IDENTIFY surveys. No sockets or timers.
+    """Explicit bounded local presence/identity/health surveys. No sockets or timers.
 
     Metrics schedules individual sends on the existing command worker; the CNI
     reader supplies replies independently. No wait for a reply holds that worker.
@@ -1048,14 +1048,24 @@ class DeviceInventory:
                 spec = {'units': [self.interface_unit]}
             if spec == 'observed':
                 spec = {'units': sorted(self.observed)[:16]}
-            mode = spec if spec in ('discover', 'sweep') else 'explicit'
+            mode = spec if spec in ('discover', 'sweep', 'health') else 'explicit'
+            if isinstance(spec, dict) and set(spec) == {'health'}:
+                mode = 'health'
+                units = spec['health']
+            elif mode == 'health':
+                units = sorted(u for u,row in self.rows.items() if row.get('type'))
+            else:
+                units = spec.get('units') if isinstance(spec, dict) and set(spec) == {'units'} else None
             error = None
-            units = spec.get('units') if isinstance(spec, dict) and set(spec) == {'units'} else None
             if mode == 'discover': units = []
             elif mode == 'sweep': units = list(range(255))
             if mode == 'explicit' and (not isinstance(units, list) or not 1 <= len(units) <= 16 or
                 any(type(u) is not int or not 0 <= u <= 254 for u in units)):
                 error = 'expected_1_to_16_local_unit_addresses_0_to_254'
+            elif mode == 'health' and (not isinstance(units, list) or not 1 <= len(units) <=
+                    (16 if isinstance(spec, dict) else 255) or
+                    any(type(u) is not int or not 0 <= u <= 254 for u in units)):
+                error = 'expected_known_inventory_or_1_to_16_explicit_health_units'
             elif readonly: error = 'readonly'
             elif not ready: error = 'command_path_not_ready'
             elif self.interface_unit is None: error = 'interface_address_unknown'
@@ -1069,14 +1079,20 @@ class DeviceInventory:
             self.last_start = self.clock()
             self.job = {'id': self.job['id']+1, 'state': 'running',
                         'requested_units': units, 'started_ts': int(self.wall()),
-                        'deadline': self.clock()+(3600 if mode != 'explicit' else 600),
-                        'mode':mode, 'phase':'presence' if mode == 'discover' else 'identifying'}
+                        'deadline': self.clock()+(3600 if mode in ('discover','sweep') or spec == 'health' else 600),
+                        'mode':mode, 'phase':'presence' if mode == 'discover' else 'health' if mode == 'health' else 'identifying'}
             self.tasks.clear(); self.pending = self.reserved = None
             self.presence_slots.clear()
             self.presence = {'state':'queued' if mode == 'discover' else 'not_requested',
                              'scan_id':self.job['id'], 'covered_slots':0, 'reported_units':[]}
             if mode == 'discover':
                 self.tasks.append((None,None))
+            elif mode == 'health':
+                for unit in units:
+                    row = self.rows.setdefault(unit, {'unit':unit, 'outcome':'not_requested', 'attributes':{}})
+                    row['health'] = {'outcome':'pending', 'scan_id':self.job['id'],
+                                     'attempt_ts':int(self.wall())}
+                    self.tasks.append((unit,4))
             else:
                 self._prepare_units(units)
             self.last_request_error = None
@@ -1086,8 +1102,10 @@ class DeviceInventory:
     def _prepare_units(self, units):
         self.job['requested_units'] = list(units)
         for unit in units:
+            health = self.rows.get(unit,{}).get('health')
             self.rows[unit] = {'unit':unit, 'outcome':'pending', 'scan_id':self.job['id'],
                                'attempt_ts':int(self.wall()), 'attributes':{}}
+            if health is not None: self.rows[unit]['health'] = health
             self.tasks.append((unit,1))
 
     def cancel(self, reason='connection_lost'):
@@ -1100,8 +1118,9 @@ class DeviceInventory:
                 self.last_start = self.clock()
                 self.job['finished_ts'] = int(self.wall())
                 for unit in self.job['requested_units']:
-                    if self.rows[unit]['outcome'] == 'pending':
-                        self.rows[unit]['outcome'] = reason
+                    row = self.rows[unit]
+                    target = row['health'] if self.job['mode'] == 'health' else row
+                    if target['outcome'] == 'pending': target['outcome'] = reason
                 self.diagnostics.bump('inventory_surveys_cancelled_total'); self._change()
             self.tasks.clear(); self.pending = self.reserved = None
             if reason == 'connection_lost':
@@ -1109,7 +1128,14 @@ class DeviceInventory:
 
     def _result(self, token, value=None):
         unit, attr = token['unit'], token['attribute']
-        row = self.rows[unit]; field = self.FIELDS[attr]
+        row = self.rows[unit]
+        if attr == 4:
+            row['health'].update(outcome='reply' if value is not None else 'no_reply',
+                                 completed_ts=int(self.wall()))
+            if value is not None:
+                row['health'].update(value, observed_ts=int(self.wall()))
+            self._change(); return
+        field = self.FIELDS[attr]
         row['attributes'][field] = {'outcome':'reply' if value is not None else 'no_reply',
                                      'observed_ts':int(self.wall())}
         if value is not None:
@@ -1150,7 +1176,7 @@ class DeviceInventory:
             self.serial += 1
             self.reserved = {'token':self.serial, 'job':self.job['id'], 'unit':unit,
                              'attribute':attr, 'destination':self.interface_unit, 'queued_at':now,
-                             'kind':'presence' if unit is None else 'identity'}
+                             'kind':'presence' if unit is None else 'health' if attr == 4 else 'identity'}
             return dict(self.reserved)
 
     def release(self, token):
@@ -1159,7 +1185,7 @@ class DeviceInventory:
                 self.reserved = None
 
     def transmit(self, token, send):
-        from .cni_protocol import build_identity_request, build_presence_request
+        from .cni_protocol import build_identity_request, build_presence_request, build_device_health_request
         with self.lock:
             if (not self.reserved or self.reserved['token'] != token['token'] or
                 self.job['state'] != 'running' or token['job'] != self.job['id'] or
@@ -1167,17 +1193,21 @@ class DeviceInventory:
                 return False
             self.tasks.popleft(); self.reserved = None
             self.pending = {**token, 'sent_at':self.clock()}
+            if token.get('kind') == 'health':
+                self.rows[token['unit']]['health']['sent_ts'] = int(self.wall())
             if token.get('kind') == 'presence':
                 self.presence['state'] = 'waiting'
                 self.presence['sent_ts'] = int(self.wall())
             try:
                 send(build_presence_request() if token.get('kind') == 'presence' else
+                     build_device_health_request(token['unit']) if token.get('kind') == 'health' else
                      build_identity_request(token['unit'],token['attribute']))
             except Exception:
                 self.cancel('send_failed')
                 self.diagnostics.bump('inventory_send_failures_total')
                 raise
             self.diagnostics.tx('inventory_presence_request' if token.get('kind') == 'presence' else
+                                'inventory_health_request' if token.get('kind') == 'health' else
                                 'inventory_identify_request', unit=token['unit'], attribute=token['attribute'])
             self.diagnostics.bump('inventory_queries_sent_total'); self._change()
             return True
@@ -1238,7 +1268,8 @@ class DeviceInventory:
         with self.lock:
             job = {k:v for k,v in self.job.items() if k != 'deadline'}
             job['units_total'] = len(self.job['requested_units'])
-            job['units_finished'] = sum(self.rows[u]['outcome'] != 'pending'
+            job['units_finished'] = sum((self.rows[u].get('health',{}) if self.job.get('mode') == 'health'
+                                        else self.rows[u]).get('outcome') != 'pending'
                                         for u in self.job['requested_units'])
             return {'schema':1, 'scope':'local_explicit_device_survey', 'version':self.version,
                     'bridge_start_ts':self.bridge_start_ts,
