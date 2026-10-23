@@ -204,6 +204,7 @@ class SchedulerTests(unittest.TestCase):
         stop = Mock(); stop.wait.side_effect = [False, True]
         client, cni, bridge = Mock(), Mock(), Mock()
         bridge.ramps.snapshot.return_value = {}
+        bridge.inventory.snapshot.return_value = {"version": 0}
         client.publish.return_value.rc = 0
         cni.failover_status.return_value = {}
         client.loop_start.side_effect = lambda: client.on_connect(client, None, {}, 0)

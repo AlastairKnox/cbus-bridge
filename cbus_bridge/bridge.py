@@ -10,10 +10,11 @@ from typing import Dict, Optional, Tuple, Set, List
 import paho.mqtt.client as mqtt
 
 from .cni_connection import CniConnection
-from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame, RAMP_CODES, parse_binary_status_reply, parse_interface_reply
+from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame, RAMP_CODES, parse_binary_status_reply, parse_interface_reply, parse_identity_reply
 from .ha_profiles import GroupProfile
 from .utils import (
     BridgeDiagnostics,
+    DeviceInventory,
     RampTracker,
     CommandRejected,
     clamp,
@@ -68,6 +69,7 @@ class CbusMqttBridge:
         ramp_readback_every=0,
     ):
         self.diagnostics = diagnostics if diagnostics is not None else BridgeDiagnostics(profiles)
+        self.inventory = DeviceInventory(self.diagnostics)
         self.cni = cni
         self.mqtt = mqtt_client
         self.profiles = profiles
@@ -130,6 +132,7 @@ class CbusMqttBridge:
         return lease.atomic(operation, expire=expire) if lease is not None else operation()
 
     def cancel_session(self):
+        self.inventory.cancel()
         self._health_waiting = None
         self._health_probe_queued = False
         self._duration_session += 1
@@ -292,6 +295,37 @@ class CbusMqttBridge:
         if not worker.submit(lambda lease:self.execute_queued(readback,lease)):
             self.ramps.release(token)
             self.diagnostics.bump('ramp_readback_queue_rejections_total')
+
+    def request_inventory(self, spec, worker):
+        result = self.inventory.request(spec, worker.snapshot()['ready'], self.readonly)
+        if not result:
+            LOG.warning('Inventory request rejected: %s', self.inventory.snapshot()['last_request_error'])
+        return result
+
+    def queue_inventory(self, worker):
+        # One short background send, never a wait for a CAL reply on the worker.
+        # Keep manager locks out of worker admission to avoid lock-order inversion.
+        token = self.inventory.reserve()
+        if token is None:
+            return
+        state = worker.snapshot()
+        if (self.readonly or not state['ready'] or state['depth'] or state['active'] or
+                not self.ramps.inventory_probe_ready()):
+            self.inventory.release(token)
+            return
+        def operation(lease):
+            try:
+                lease.atomic(lambda:self.ramps.send_inventory_probe(
+                    lambda:self.inventory.transmit(token,self.cni.send_hex_frame)))
+            finally:
+                self.inventory.release(token)
+        try:
+            accepted = worker.submit(operation, key='inventory_identify')
+        except Exception:
+            self.inventory.release(token)
+            raise
+        if not accepted:
+            self.inventory.release(token)
 
     def queue_health_probe(self, worker):
         if self._health_probe_queued and time.monotonic()-self._health_probe_queued >= 6:
@@ -987,6 +1021,8 @@ class CbusMqttBridge:
             setup = parse_interface_reply(text_line, pending)
             if setup:
                 self._valid_rx()
+                if setup.get('unit') is not None:
+                    self.inventory.set_interface_unit(setup['unit'])
                 self.diagnostics.bump('interface_setup_replies_total')
                 self.diagnostics.event('interface_setup_reply', 'RX', **setup)
                 self._pending_setup = {cmd: deadline for cmd, deadline in self._pending_setup.items()
@@ -1003,6 +1039,15 @@ class CbusMqttBridge:
 
             # DEBUG: show every inbound non-ACK frame (parsed or not)
             LOG.debug("RX frame: raw=%r norm=%s", raw, norm)
+
+            identity = parse_identity_reply(norm)
+            if identity:
+                self._valid_rx()
+                matched = self.inventory.receive(identity)
+                self.diagnostics.bump('rx_identity_total')
+                self.diagnostics.event('inventory_identity_reply', 'RX', unit=identity.unit,
+                                       attribute=identity.attribute, matched=matched)
+                continue
 
             category = diagnose_frame(norm)
             self.diagnostics.bump("rx_" + category + "_total")
@@ -1033,6 +1078,7 @@ class CbusMqttBridge:
 
             sals = parse_monitored_sals(norm)
             for sal in (item for item in sals if item.app == 0x38):
+                self.inventory.observe_unit(sal.dev)
                 self._valid_rx()
                 self.diagnostics.bump("lighting_commands_observed_total")
                 self.diagnostics.observed(sal.app, sal.group)

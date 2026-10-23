@@ -136,3 +136,12 @@ See releases/RELEASE-15.md. No HA reload is required. Acceptance should include
 simultaneous duration requests for Study and Upstairs, normal immediate controls,
 and final brightness/OFF feedback. Fresh-level queries remain globally spaced;
 fade starts can be staggered. Retain the pre-release backup and rollback helper.
+
+## Device identity trial (Release 16)
+
+Deploy via the existing exact-commit workflow, then accept ordinary HA/physical
+controls before invoking any inventory command. No HA restart/reload is needed.
+Installation sends no new inventory query automatically. Follow
+`docs/DEVICE-INVENTORY.md` to listen to MQTT results and deliberately request the
+CNI-only identity trial. Keep the backup and saved rollback helper. No device
+parameters or latched errors are changed by the inventory queries.

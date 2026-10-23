@@ -820,6 +820,21 @@ class RampTracker:
             self.diagnostics.bump('ramp_readback_requests_total')
             return True
 
+    def inventory_probe_ready(self):
+        with self.lock:
+            return not self.entries and self.clock() >= self.last_sent+3
+
+    def send_inventory_probe(self, operation):
+        with self.lock:
+            if not self.inventory_probe_ready():
+                return False
+            result = operation()
+            if result:
+                self.pending = None
+                self.last_sent = self.clock()
+                self.next_bus = self.last_sent+3
+            return result
+
     def send_duration_probe(self, app, start, operation):
         # The command worker serializes probes with lighting commands. Supersede
         # an unsent background reservation rather than wait behind our own queue.
@@ -977,3 +992,189 @@ class FunctionalHealth:
         return {'progress_timeout_s': self.timeout,
                 'progress_age_s': {name: round(max(0,now-when),3) for name,when in self.progress.copy().items()},
                 'stalled': self.stalled()}
+
+
+class DeviceInventory:
+    """An explicit, bounded local IDENTIFY survey. No sockets, timers or retries.
+
+    Metrics schedules individual sends on the existing command worker; the CNI
+    reader supplies replies independently. No wait for a reply holds that worker.
+    """
+    FIELDS = {0: 'manufacturer', 1: 'type', 2: 'firmware'}
+
+    def __init__(self, diagnostics, clock=None, wall=None):
+        import threading
+        import time
+        from collections import deque
+        self.lock = threading.RLock()
+        self.diagnostics = diagnostics
+        self.clock, self.wall = clock or time.monotonic, wall or time.time
+        self.tasks = deque()
+        self.rows, self.observed = {}, set()
+        self.interface_unit = None
+        self.bridge_start_ts = int(self.wall())
+        self.pending = self.reserved = None
+        self.job = {'id': 0, 'state': 'idle', 'requested_units': []}
+        self.last_request_error = None
+        self.last_start = float('-inf')
+        self.serial = self.version = 0
+
+    def _change(self):
+        self.version += 1
+
+    def observe_unit(self, unit):
+        if type(unit) is int and 0 <= unit <= 254:
+            with self.lock:
+                if unit not in self.observed:
+                    self.observed.add(unit); self._change()
+
+    def set_interface_unit(self, unit):
+        if type(unit) is int and 0 <= unit <= 254:
+            with self.lock:
+                if self.interface_unit != unit:
+                    self.interface_unit = unit; self._change()
+
+    def request(self, spec, ready, readonly=False):
+        with self.lock:
+            if spec == 'cancel':
+                self.cancel('cancelled'); return True
+            if spec == 'interface':
+                if self.interface_unit is None:
+                    self.last_request_error = 'interface_address_unknown'
+                    self.diagnostics.bump('inventory_requests_rejected_total'); self._change()
+                    return False
+                spec = {'units': [self.interface_unit]}
+            if spec == 'observed':
+                spec = {'units': sorted(self.observed)[:16]}
+            error = None
+            units = spec.get('units') if isinstance(spec, dict) and set(spec) == {'units'} else None
+            if (not isinstance(units, list) or not 1 <= len(units) <= 16 or
+                any(type(u) is not int or not 0 <= u <= 254 for u in units)):
+                error = 'expected_1_to_16_local_unit_addresses_0_to_254'
+            elif readonly: error = 'readonly'
+            elif not ready: error = 'command_path_not_ready'
+            elif self.interface_unit is None: error = 'interface_address_unknown'
+            elif self.job['state'] == 'running': error = 'inventory_already_running'
+            elif self.clock() < self.last_start + 30: error = 'inventory_rate_limited'
+            if error:
+                self.last_request_error = error
+                self.diagnostics.bump('inventory_requests_rejected_total'); self._change()
+                return False
+            units = sorted(set(units))
+            self.last_start = self.clock()
+            self.job = {'id': self.job['id']+1, 'state': 'running',
+                        'requested_units': units, 'started_ts': int(self.wall()),
+                        'deadline': self.clock()+600}
+            self.tasks.clear(); self.pending = self.reserved = None
+            for unit in units:
+                self.rows[unit] = {'unit':unit, 'outcome':'pending', 'scan_id':self.job['id'],
+                                   'attempt_ts':int(self.wall()), 'attributes':{}}
+                self.tasks.append((unit,1))
+            self.last_request_error = None
+            self.diagnostics.bump('inventory_surveys_started_total'); self._change()
+            return True
+
+    def cancel(self, reason='connection_lost'):
+        with self.lock:
+            if self.job['state'] == 'running':
+                self.job['state'] = reason
+                self.last_start = self.clock()
+                self.job['finished_ts'] = int(self.wall())
+                for unit in self.job['requested_units']:
+                    if self.rows[unit]['outcome'] == 'pending':
+                        self.rows[unit]['outcome'] = reason
+                self.diagnostics.bump('inventory_surveys_cancelled_total'); self._change()
+            self.tasks.clear(); self.pending = self.reserved = None
+            if reason == 'connection_lost':
+                self.interface_unit = None; self._change()
+
+    def _result(self, token, value=None):
+        unit, attr = token['unit'], token['attribute']
+        row = self.rows[unit]; field = self.FIELDS[attr]
+        row['attributes'][field] = {'outcome':'reply' if value is not None else 'no_reply',
+                                     'observed_ts':int(self.wall())}
+        if value is not None:
+            row[field] = value
+        if attr == 1 and value is not None:
+            # Probe identity first; only responsive units receive the other reads.
+            self.tasks.appendleft((unit,2)); self.tasks.appendleft((unit,0))
+        elif attr == 1:
+            row['outcome'] = 'no_reply'  # Not a diagnosis of absence/offline/fault.
+        if attr == 2:
+            row['outcome'] = 'identified' if all(
+                row['attributes'].get(f,{}).get('outcome') == 'reply' for f in self.FIELDS.values()) else 'partial'
+        self._change()
+
+    def reserve(self):
+        with self.lock:
+            now = self.clock()
+            if self.job['state'] != 'running': return None
+            if now >= self.job['deadline']:
+                self.cancel('survey_deadline'); return None
+            if self.pending and now >= self.pending['sent_at']+3:
+                self._result(self.pending)
+                self.diagnostics.bump('inventory_query_timeouts_total')
+                self.pending = None
+            if self.reserved and now >= self.reserved['queued_at']+6:
+                self.reserved = None
+            if self.pending or self.reserved: return None
+            if not self.tasks:
+                self.job['state'] = 'complete'; self.job['finished_ts'] = int(self.wall())
+                self.last_start = self.clock()
+                self._change(); return None
+            unit, attr = self.tasks[0]
+            self.serial += 1
+            self.reserved = {'token':self.serial, 'job':self.job['id'], 'unit':unit,
+                             'attribute':attr, 'destination':self.interface_unit, 'queued_at':now}
+            return dict(self.reserved)
+
+    def release(self, token):
+        with self.lock:
+            if self.reserved and self.reserved['token'] == token['token']:
+                self.reserved = None
+
+    def transmit(self, token, send):
+        from .cni_protocol import build_identity_request
+        with self.lock:
+            if (not self.reserved or self.reserved['token'] != token['token'] or
+                self.job['state'] != 'running' or token['job'] != self.job['id'] or
+                self.clock() >= self.job['deadline'] or self.clock() >= token['queued_at']+5):
+                return False
+            self.tasks.popleft(); self.reserved = None
+            self.pending = {**token, 'sent_at':self.clock()}
+            try:
+                send(build_identity_request(token['unit'],token['attribute']))
+            except Exception:
+                self.cancel('send_failed')
+                self.diagnostics.bump('inventory_send_failures_total')
+                raise
+            self.diagnostics.tx('inventory_identify_request', unit=token['unit'], attribute=token['attribute'])
+            self.diagnostics.bump('inventory_queries_sent_total'); self._change()
+            return True
+
+    def receive(self, reply):
+        with self.lock:
+            p = self.pending
+            if (not p or self.job['state'] != 'running' or
+                self.clock() >= p['sent_at']+3 or self.clock() >= self.job['deadline'] or
+                (reply.unit,reply.destination,reply.attribute) != (p['unit'],p['destination'],p['attribute'])):
+                self.diagnostics.bump('inventory_unmatched_replies_total'); return False
+            self.pending = None
+            self._result(p,reply.value)
+            self.diagnostics.bump('inventory_replies_matched_total')
+            return True
+
+    def revision(self):
+        with self.lock:
+            return self.version
+
+    def snapshot(self):
+        import copy
+        with self.lock:
+            job = {k:v for k,v in self.job.items() if k != 'deadline'}
+            return {'schema':1, 'scope':'local_explicit_identity_survey', 'version':self.version,
+                    'bridge_start_ts':self.bridge_start_ts,
+                    'interface_unit':self.interface_unit, 'observed_units':sorted(self.observed),
+                    'job':copy.deepcopy(job), 'last_request_error':self.last_request_error,
+                    'pending':{k:self.pending[k] for k in ('unit','attribute')} if self.pending else None,
+                    'devices':copy.deepcopy([self.rows[u] for u in sorted(self.rows)])}

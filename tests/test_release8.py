@@ -267,6 +267,7 @@ class RampBridgeTests(unittest.TestCase):
     def test_tracking_scheduler_runs_without_diagnostics_publishing(self):
         client,cni,bridge=Mock(),Mock(),Mock()
         cni.failover_status.return_value={};bridge.ramps.snapshot.return_value={}
+        bridge.inventory.snapshot.return_value={"version":0}
         targets={}
         mqtt_up,cni_up=threading.Event(),threading.Event()
         stop=Mock();stop.wait.side_effect=[False,True]

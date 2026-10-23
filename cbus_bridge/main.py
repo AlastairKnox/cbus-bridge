@@ -344,6 +344,13 @@ def run(argv=None) -> int:
             diagnostics.bump("readonly_commands_ignored_total")
             return
         if msg.topic == args.resync_topic:
+            try:
+                request = json.loads(msg.payload) if msg.payload.lstrip().startswith(b'{') else None
+            except (ValueError, UnicodeError):
+                request = None
+            if isinstance(request, dict) and set(request) == {'inventory'}:
+                bridge.request_inventory(request['inventory'],worker)
+                return
             text = msg.payload.decode("utf-8", errors="ignore").strip().lower()
             mode = ("full" if text in ("resync_full", "full") else
                     args.resync_mode if text in ("resync", "sync", "status") else None)
@@ -407,6 +414,7 @@ def run(argv=None) -> int:
 
     def metrics_loop():
         next_status = next_traffic = next_groups = next_mqtt_probe = 0.0
+        inventory_version = None
         while not stop_event.wait(0.25):
             health.beat('metrics')
             now = time.monotonic()
@@ -420,6 +428,12 @@ def run(argv=None) -> int:
                                       qos=1, retain=True)
                 bridge.queue_health_probe(worker)
                 bridge.queue_ramp_readback(worker)
+                bridge.queue_inventory(worker)
+                if inventory_version != bridge.inventory.revision():
+                    inventory = bridge.inventory.snapshot()
+                    info = publisher.publish('cbus/bridge/inventory', json.dumps(inventory,separators=(',',':')), qos=1, retain=True)
+                    if info.rc == mqtt.MQTT_ERR_SUCCESS:
+                        inventory_version = inventory['version']
                 if status_interval and now >= next_status:
                     next_status = now + status_interval
                     if mqtt_up.is_set():

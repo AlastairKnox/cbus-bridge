@@ -48,3 +48,7 @@ and priority for ordinary controls. See [release notes](releases/RELEASE-14.md).
 Release 15 queues overlapping fade requests across groups, preserves immediate UI
 priority and resumes fade acquisition after ordinary controls. See
 [release notes](releases/RELEASE-15.md) for queue limits and acceptance checks.
+
+Release 16 adds an explicit device identity survey trial, with no automatic scan.
+See [device inventory](docs/DEVICE-INVENTORY.md) for the one-unit CNI trial and
+[release notes](releases/RELEASE-16.md) for pacing, validation and deployment.

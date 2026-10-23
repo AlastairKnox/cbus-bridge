@@ -155,17 +155,55 @@ def parse_binary_status_reply(hexline: str) -> Optional[BinaryStatusReply]:
     return BinaryStatusReply(b[0], b[1], b[2], states, hexline)
 
 
+@dataclass(frozen=True)
+class IdentityReply:
+    unit: int
+    destination: int
+    attribute: int
+    value: str
+
+
+def build_identity_request(unit, attribute):
+    """SIUG 4.2.9.1/7.2: local unicast IDENTIFY only; never RESET/STORE."""
+    if type(unit) is not int or not 0 <= unit <= 254:
+        raise ValueError('Unit must be 0..254; broadcast is forbidden')
+    if type(attribute) is not int or attribute not in (0, 1, 2):
+        raise ValueError('Only manufacturer/type/firmware IDENTIFY is supported')
+    raw = bytes((0x06, unit, 0x00, 0x21, attribute))
+    return (raw + bytes((-sum(raw) & 255,))).hex().upper()
+
+
+def parse_identity_reply(hexline):
+    """Local SMART CAL REPLY: 86 source destination 00 89 attr ASCII[8] checksum.
+
+    Routed, short-form, malformed and non-identity replies remain unsupported.
+    Wire replies have no transaction identifier; a caller must match an active
+    unit/destination/attribute request within its response window.
+    """
+    b = _checked_frame(hexline)
+    if (b is None or len(b) != 15 or b[0] != 0x86 or b[1] == 255 or
+            b[2] == 255 or b[3] != 0 or b[4] != 0x89 or b[5] not in (0, 1, 2)):
+        return None
+    text = b[6:-1].rstrip(b' \x00')
+    if not text or any(ch < 32 or ch > 126 for ch in text):
+        return None
+    return IdentityReply(b[1], b[2], b[5], text.decode('ascii').strip())
+
+
 def diagnose_frame(hexline: str) -> str:
     """Classify supported envelopes without labelling unrelated traffic corrupt."""
     if not hexline or len(hexline) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", hexline):
         return "nonhex"
     b = bytes.fromhex(hexline)
+    identity = len(b) >= 6 and b[0] == 0x86 and b[3] == 0 and b[4] == 0x89 and b[5] in (0, 1, 2)
     binary = 0xC0 <= b[0] < 0xE0
-    supported = binary or b[0] == 0x05 or (b[0] >= 0xE0 and len(b) > 1 and b[1] in (0x07, 0x47))
+    supported = identity or binary or b[0] == 0x05 or (b[0] >= 0xE0 and len(b) > 1 and b[1] in (0x07, 0x47))
     if not supported:
         return "unsupported"
     if sum(b) % 256:
         return "checksum_failure"
+    if identity:
+        return "identity" if parse_identity_reply(hexline) else "malformed"
     if binary:
         if len(b) > 1 and b[1] != 0x38:
             return "unsupported"
