@@ -89,13 +89,15 @@ The bridge's ACK-success feedback changes the virtual level from 100% to 50% and
 emits a **level** event, not another ON. The eDLT can receive that group-level
 command; its actual display/indicator behavior requires physical acceptance.
 Startup waits for a newer accepted control event, then powers the players and
-sets MA volume to 0.5 before playing Favourites, enabling shuffle and repeat.
+caps the initial MA volume at 0.5 before playing Favourites, enabling shuffle and repeat.
 A more recent deliberate volume request during startup wins instead. OFF cancels
 startup, stops/powers off MA, then explicitly powers off the physical Yamaha zone.
 
 Wall percentage maps directly to player percentage, with a 0.12 floor and the
-existing 0.5 normal-control ceiling: 50% on the eDLT means 50% player volume.
-Positions above 50% do not raise volume beyond that ceiling. This differs from
+0.65 normal-control ceiling: 50% on the eDLT means 50% player volume.
+Positions up to 65% adjust volume directly; higher positions remain capped at 65%.
+Raw levels are rounded to the nearest whole percentage to match the wall control.
+ON itself requests a 50% startup level, never the upper limit. This differs from
 the earlier draft's half-scale mapping (which made wall 50% equal player 25%).
 There is exactly one startup level write; its ACK/observed echo does not replay
 ON, restart the playlist or write another level back to C-Bus.

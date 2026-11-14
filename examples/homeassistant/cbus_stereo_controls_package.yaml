@@ -7,7 +7,7 @@ input_number:
   stereo_requested_volume:
     name: Stereo requested volume
     min: 0.12
-    max: 0.5
+    max: 0.65
     step: 0.001
     initial: 0.12
 input_text:
@@ -91,7 +91,7 @@ script:
         target:
           entity_id: media_player.big_room
         data:
-          volume_level: '{{ [0.5, [0.12, states("input_number.stereo_requested_volume") | float(0.12)] | max] | min }}'
+          volume_level: '{{ [0.65, [0.12, states("input_number.stereo_requested_volume") | float(0.12)] | max] | min }}'
 automation:
 - id: stereo_virtual_wall_control
   alias: Stereo - Fresh eDLT controls via Music Assistant
@@ -125,7 +125,7 @@ automation:
   actions:
   - variables:
       event: '{{ trigger.payload_json }}'
-      target_volume: '{{ [0.5, [0.12, (trigger.payload_json.level | float(0) / 255)] | max] | min }}'
+      target_volume: '{{ [0.65, [0.12, ((trigger.payload_json.level | float(0) / 255) | round(2))] | max] | min }}'
       event_id: >-
         {{ trigger.payload_json.session ~ ':' ~ trigger.payload_json.sequence ~ ':' ~ trigger.payload_json.ts }}
   - action: input_text.set_value
@@ -159,7 +159,7 @@ automation:
         target:
           entity_id: input_number.stereo_requested_volume
         data:
-          value: '{{ target_volume }}'
+          value: 0.5
       - action: input_boolean.turn_on
         target:
           entity_id: input_boolean.stereo_control_active
