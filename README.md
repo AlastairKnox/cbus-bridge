@@ -184,3 +184,13 @@ python -B -m unittest discover -s tests -v
 - [Release-by-release implementation and validation notes](releases/)
 
 Detailed release notes and deployment instructions include the original installation's examples and paths. Adapt them to your own installation rather than copying site-specific settings unchanged.
+
+
+### Virtual wall-switch controls
+
+An explicit `--virtual-control 254/56/250@110` profile lets a command-only C-Bus
+wall-switch group control software such as Music Assistant without waiting for a
+physical lighting output. Its virtual level is labelled as commanded/estimated;
+normal lighting groups keep their physical readback rules. Fresh non-retained
+control events are separate from cached display state. See
+[virtual controls and stereo example](docs/VIRTUAL-CONTROLS.md).

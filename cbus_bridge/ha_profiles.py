@@ -37,6 +37,9 @@ class GroupProfile:
     # Track last non-zero level for better ON behaviour
     last_nonzero_255: int = 255
 
+    # Explicit bridge-only opt-in; never inferred from a missing physical output.
+    virtual_control_source: Optional[int] = None
+
 
 def parse_group_from_topic(topic: str) -> Optional[Tuple[int, int, int]]:
     """
@@ -271,3 +274,18 @@ def load_ha_mqtt_profiles(path: str) -> Dict[Tuple[int, int, int], GroupProfile]
 
     return profiles
 
+
+
+def configure_virtual_controls(profiles, specifications):
+    """Opt in known command-only groups: NET/APP/GROUP@SOURCE_UNIT."""
+    seen=set()
+    for spec in specifications:
+        m=re.fullmatch(r"254/56/(0|[1-9][0-9]{0,2})@(0|[1-9][0-9]{0,2})",spec)
+        if not m or int(m[1]) > 255 or int(m[2]) > 254:
+            raise ValueError('Virtual control requires 254/56/GROUP@UNIT (group 0..255, unit 0..254)')
+        key=(254,56,int(m[1]));p=profiles.get(key)
+        if key in seen or p is None or p.level_mode != 'pct' or not p.command_topic or not p.level_command_topic:
+            raise ValueError('Virtual control must select one unique configured writable dimmer profile')
+        seen.add(key)
+        p.virtual_control_source=int(m[2])
+    return profiles

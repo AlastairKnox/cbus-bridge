@@ -1,0 +1,189 @@
+# Virtual group 254/56/250. Fresh events only; no replay of diagnostic attributes.
+input_boolean:
+  stereo_control_active:
+    name: Stereo wall control active
+    initial: false
+input_number:
+  stereo_requested_volume:
+    name: Stereo requested volume
+    min: 0.12
+    max: 0.5
+    step: 0.001
+    initial: 0.12
+input_text:
+  stereo_control_last_event:
+    name: Stereo last processed control event
+    max: 255
+script:
+  stereo_start_favourites:
+    alias: Stereo - Start Favourites safely
+    mode: restart
+    fields:
+      start_event:
+        description: Accepted event ID, used to detect a newer volume request.
+    sequence:
+    - variables:
+        start_volume: >-
+          {{ [0.5, states('input_number.stereo_requested_volume') | float(0.12),
+              state_attr('media_player.big_room', 'volume_level') | float(0.12),
+              state_attr('media_player.media_room_zone2', 'volume_level') | float(0.12)] | min }}
+    - condition: state
+      entity_id: input_boolean.stereo_control_active
+      state: 'on'
+    - action: media_player.turn_on
+      target:
+        entity_id: media_player.media_room_zone2
+    - wait_template: "{{ states('media_player.media_room_zone2') not in ['off','unavailable','unknown'] }}"
+      timeout: '00:00:10'
+      continue_on_timeout: false
+    - action: media_player.turn_on
+      target:
+        entity_id: media_player.big_room
+    - wait_template: "{{ states('media_player.big_room') not in ['off','unavailable','unknown'] }}"
+      timeout: '00:00:10'
+      continue_on_timeout: false
+    - condition: state
+      entity_id: input_boolean.stereo_control_active
+      state: 'on'
+    - action: media_player.volume_set
+      target:
+        entity_id: media_player.big_room
+      data:
+        volume_level: '{{ [0, start_volume | float(0.12)] | max }}'
+    - action: music_assistant.play_media
+      target:
+        entity_id: media_player.big_room
+      data:
+        media_id: Favourites
+        media_type: playlist
+        enqueue: replace
+    - wait_template: "{{ is_state('media_player.big_room', 'playing') }}"
+      timeout: '00:00:20'
+      continue_on_timeout: false
+    - action: media_player.shuffle_set
+      continue_on_error: true
+      target:
+        entity_id: media_player.big_room
+      data:
+        shuffle: true
+    - action: media_player.repeat_set
+      continue_on_error: true
+      target:
+        entity_id: media_player.big_room
+      data:
+        repeat: all
+    - if:
+      - condition: state
+        entity_id: input_boolean.stereo_control_active
+        state: 'on'
+      - condition: template
+        value_template: "{{ states('input_text.stereo_control_last_event') != start_event }}"
+      then:
+      - action: media_player.volume_set
+        target:
+          entity_id: media_player.big_room
+        data:
+          volume_level: '{{ [0.5, [0.12, states("input_number.stereo_requested_volume") | float(0.12)] | max] | min }}'
+automation:
+- id: stereo_virtual_wall_control
+  alias: Stereo - Fresh eDLT controls via Music Assistant
+  description: Process fresh session events, never retained light state or diagnostic history.
+  mode: restart
+  triggers:
+  - trigger: mqtt
+    topic: cbus/bridge/controls/254/56/250/event
+    qos: 0
+  conditions:
+  - condition: template
+    value_template: >-
+      {% set e = trigger.payload_json | default({}) %}
+      {% set age = as_timestamp(now()) - (e.ts | default(0) | float(0)) %}
+      {% set old = states('input_text.stereo_control_last_event').split(':') %}
+      {% set old_session = old[0] if old | length == 3 else '' %}
+      {% set old_sequence = old[1] | int(0) if old | length == 3 else 0 %}
+      {% set old_ts = old[2] | float(0) if old | length == 3 else 0 %}
+      {{ e.schema | default(0) == 1 and e.net | default(0) == 254
+         and e.app | default(0) == 56 and e.group | default(0) == 250
+         and e.semantics | default('') == 'virtual_command_model'
+         and e.physical_confirmed | default(true) == false
+         and e.origin | default('') in ['observed_command','transmitted_command']
+         and (e.origin == 'transmitted_command' or e.unit | default(-1) == 110)
+         and e.action | default('') in ['on','off','level','stop']
+         and e.level | default(none) is number and 0 <= e.level <= 255
+         and e.session | default('') | length == 32
+         and e.sequence | default(0) | int(0) > 0 and -2 <= age <= 10
+         and (e.ts | float(0)) >= old_ts
+         and (e.session != old_session or (e.sequence | int(0)) > old_sequence) }}
+  actions:
+  - variables:
+      event: '{{ trigger.payload_json }}'
+      target_volume: '{{ [0.5, [0.12, (trigger.payload_json.level | float(0) / 255) * 0.5] | max] | min }}'
+      event_id: >-
+        {{ trigger.payload_json.session ~ ':' ~ trigger.payload_json.sequence ~ ':' ~ trigger.payload_json.ts }}
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.stereo_control_last_event
+    data:
+      value: '{{ event_id }}'
+  - choose:
+    - conditions: '{{ event.level | int == 0 or event.action == "off" }}'
+      sequence:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.stereo_control_active
+      - action: script.turn_off
+        target:
+          entity_id: script.stereo_start_favourites
+      - action: media_player.media_stop
+        continue_on_error: true
+        target:
+          entity_id: media_player.big_room
+      - action: media_player.turn_off
+        continue_on_error: true
+        target:
+          entity_id: media_player.big_room
+      - action: media_player.turn_off
+        target:
+          entity_id: media_player.media_room_zone2
+    - conditions: '{{ event.action == "on" }}'
+      sequence:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.stereo_requested_volume
+        data:
+          value: '{{ target_volume }}'
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.stereo_control_active
+      - action: script.turn_on
+        target:
+          entity_id: script.stereo_start_favourites
+        data:
+          variables:
+            start_event: '{{ event_id }}'
+    default:
+    - condition: state
+      entity_id: input_boolean.stereo_control_active
+      state: 'on'
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.stereo_requested_volume
+      data:
+        value: '{{ target_volume }}'
+    - condition: state
+      entity_id: script.stereo_start_favourites
+      state: 'off'
+    - condition: template
+      value_template: "{{ states('media_player.big_room') not in ['off','unavailable','unknown'] }}"
+    - action: media_player.volume_set
+      target:
+        entity_id: media_player.big_room
+      data:
+        volume_level: '{{ target_volume }}'
+recorder:
+  exclude:
+    entities:
+    - input_boolean.stereo_control_active
+    - input_number.stereo_requested_volume
+    - input_text.stereo_control_last_event
+    - script.stereo_start_favourites

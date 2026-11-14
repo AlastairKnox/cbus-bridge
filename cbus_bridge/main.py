@@ -11,7 +11,7 @@ from typing import Optional
 
 import paho.mqtt.client as mqtt
 
-from .ha_profiles import load_ha_mqtt_profiles
+from .ha_profiles import load_ha_mqtt_profiles, configure_virtual_controls
 from .cni_connection import CniConnection
 from .bridge import CbusMqttBridge
 from .utils import BridgeDiagnostics, CommandWorker, command_requires_duration_wait
@@ -78,6 +78,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     ap.add_argument("--device-monitor-config", default=None,
                     help="Optional reviewed device roster; missing/invalid config disables device polling.")
+
+    ap.add_argument("--virtual-control", action="append", default=[], metavar="254/56/GROUP@UNIT",
+                    help="Explicit virtual command-only dimmer and allowed wall-switch source; repeatable.")
 
     ap.add_argument("--init", action="store_true", help="Send CNI init sequence.")
     ap.add_argument("--monitor", action=argparse.BooleanOptionalAction, default=False,
@@ -146,6 +149,10 @@ def run(argv=None) -> int:
     )
 
     profiles = load_ha_mqtt_profiles(args.ha_config)
+    try:
+        configure_virtual_controls(profiles,args.virtual_control)
+    except ValueError as exc:
+        parser.error(str(exc))
     LOG.info("Loaded %d C-Bus group profiles from HA config", len(profiles))
 
     readonly = args.readonly
@@ -288,6 +295,7 @@ def run(argv=None) -> int:
             metrics.last_mqtt_connect_ts = now_epoch()
             metrics.last_mqtt_connect_mono = time.monotonic()
 
+            bridge.virtual_controls.reset()
             LOG.info("MQTT connected")
             client.subscribe("cbus/write/+/+/+/+")
             LOG.info("Subscribed to cbus/write/+/+/+/+")
@@ -440,6 +448,7 @@ def run(argv=None) -> int:
                                       payload=AVAIL_ONLINE if usable else AVAIL_OFFLINE,
                                       qos=1, retain=True)
                 bridge.queue_health_probe(worker)
+                bridge.virtual_controls.tick()
                 bridge.queue_ramp_readback(worker)
                 device_monitor.tick(worker.snapshot()['ready'],readonly)
                 bridge.queue_inventory(worker)

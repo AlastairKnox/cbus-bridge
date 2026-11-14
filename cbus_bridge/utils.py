@@ -133,7 +133,9 @@ class BridgeDiagnostics:
             'last_binary_status_mono': None, 'last_binary_publish_ts': None,
             'level_mode': p.level_mode, 'level_report_ts': None, 'level_report_mono': None,
             'session_level_seen': False,
-            'profile_kind': 'writable' if p.command_topic else 'read_only',
+            'profile_kind': 'virtual_control' if p.virtual_control_source is not None else 'writable' if p.command_topic else 'read_only',
+            'state_semantics': 'virtual_command_model' if p.virtual_control_source is not None else 'physical_load',
+            'virtual_source_unit': p.virtual_control_source,
         } for p in profiles.values()}
 
     def command_failure(self, reason, *, app=None, group=None):
@@ -209,7 +211,8 @@ class BridgeDiagnostics:
                 return
             state = self.groups[key]
             state.update(last_publish_ts=int(self.wall()), published_level=level, source=source,
-                         confidence='reported_level' if source == 'STATUS' else
+                         confidence='virtual_control' if source.startswith('VIRTUAL_') else
+                         'reported_level' if source == 'STATUS' else
                          'transmitted' if source == 'ACK' else 'observed_command')
 
     def transition_transmitted(self, profile, target, seconds, *, stopped=False):

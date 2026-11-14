@@ -12,6 +12,12 @@ case "${CNI_MONITOR:-1}" in
   *) echo 'CNI_MONITOR must be 0 or 1' >&2; exit 1 ;;
 esac
 
+# Explicit one-group opt-in; leave unset for physical-load behavior everywhere.
+virtual_control_args=()
+if [[ -n "${CBUS_VIRTUAL_CONTROL:-}" ]]; then
+  virtual_control_args=(--virtual-control "$CBUS_VIRTUAL_CONTROL")
+fi
+
 exec python /opt/cbus_bridge/run_bridge.py \
   --device-monitor-config "${CBUS_DEVICE_MONITOR_CONFIG:-/opt/cbus_bridge/device_monitor.json}" \
   --cni-host "${CNI_HOST}" \
@@ -23,6 +29,7 @@ exec python /opt/cbus_bridge/run_bridge.py \
   --ha-config "${HA_CONFIG}" \
   --log-level "${LOG_LEVEL}" \
   "${monitor_args[@]}" \
+  "${virtual_control_args[@]}" \
   ${INIT} ${STATUS} ${STATUS_96} \
   --resync-every "${RESYNC_EVERY}" \
   --resync-mode "${RESYNC_MODE}" \

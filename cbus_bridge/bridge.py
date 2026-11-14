@@ -117,8 +117,9 @@ class CbusMqttBridge:
         self._state_publish_lock = threading.RLock()
         self._last_published_state = {}
         self.ramps = RampTracker(self.diagnostics,
-            {(p.app,p.group) for p in profiles.values() if p.level_mode == 'pct'},
+            {(p.app,p.group) for p in profiles.values() if p.level_mode == 'pct' and p.virtual_control_source is None},
             interval=0 if readonly else ramp_readback_every)
+        self.virtual_controls = VirtualControls(self)
 
     def execute_queued(self, operation, lease):
         self._command_local.lease = lease
@@ -132,6 +133,7 @@ class CbusMqttBridge:
         return lease.atomic(operation, expire=expire) if lease is not None else operation()
 
     def cancel_session(self):
+        self.virtual_controls.reset()
         self.inventory.cancel()
         self._health_waiting = None
         self._health_probe_queued = False
@@ -214,7 +216,7 @@ class CbusMqttBridge:
 
     def _has_pct_profile(self, app: int, group: int) -> bool:
         return any(
-            p.level_mode == "pct"
+            p.level_mode == "pct" and p.virtual_control_source is None
             for p in self._profiles_by_app_group.get((int(app), int(group)), [])
         )
 
@@ -272,6 +274,7 @@ class CbusMqttBridge:
             return 'failed'
 
     def _begin_ramp(self, app, group, cmd, level, *, observed=False):
+        if self.virtual_controls.contains(app,group): return None
         rates = {v:k for k,v in RAMP_CODES.items()}
         if cmd == 0x09:
             target, seconds = None, None
@@ -379,6 +382,7 @@ class CbusMqttBridge:
                     self.diagnostics.bump('ramp_binary_updates_suppressed_total')
                     continue
                 for profile in self._profiles_by_app_group.get((reply.app, group), []):
+                    if profile.virtual_control_source is not None: continue
                     if profile.level_state_topic == profile.state_topic:
                         # Some existing templates derive state and brightness from a
                         # single numeric topic. An ON/OFF string would corrupt both.
@@ -404,6 +408,10 @@ class CbusMqttBridge:
         fan mode: publish preset numeric level and state ON/OFF.
         none: publish state ON/OFF only.
         """
+        if p.virtual_control_source is not None:
+            if source == 'ACK':
+                self.virtual_controls.command(p.app,p.group,RAMP_CODES[0],level255,origin='transmitted_command')
+            return
         if source == 'STATUS' and (p.net,p.app,p.group) == self._duration_key:
             self._duration_level = int(level255)
             self._duration_level_event.set()
@@ -703,6 +711,9 @@ class CbusMqttBridge:
             LOG.warning('Rejected invalid dimmer transition')
             return
         duration = action in ('duration','duration_restore')
+        if duration and profile.virtual_control_source is not None and seconds:
+            self.diagnostics.command_failure('virtual_duration_unsupported',app=profile.app,group=profile.group)
+            return
         start_level = nominal_duration = None
         requested_seconds = seconds
         if duration:
@@ -744,6 +755,10 @@ class CbusMqttBridge:
                     LOG.info('Duration transition group=%d target=%d requested=%ss full_scale=%ss nominal=%.3fs',
                              profile.group,target,requested_seconds,seconds,nominal_duration)
             self._guarded(record, expire=False)
+            if profile.virtual_control_source is not None:
+                cmd = 0x09 if action == 'stop' else RAMP_CODES[seconds]
+                self._guarded(lambda:self.virtual_controls.command(profile.app,profile.group,cmd,target,
+                    origin='transmitted_command'),expire=False)
             # These opt-in commands do not publish a target as current brightness,
             # even at rate zero: only subsequent monitored/status traffic does.
 
@@ -977,6 +992,7 @@ class CbusMqttBridge:
 
         LOG.info("Entering read loop")
         self._last_valid_rx = time.monotonic()
+        self.virtual_controls.ready()
         if on_ready is not None:
             on_ready()
         while True:
@@ -1109,6 +1125,9 @@ class CbusMqttBridge:
                 self.diagnostics.observed(sal.app, sal.group)
                 self.diagnostics.event("lighting", "RX", app=sal.app, group=sal.group,
                                        unit=sal.dev, command=sal.cmd, level=sal.level)
+                if self.virtual_controls.contains(sal.app,sal.group):
+                    self.virtual_controls.command(sal.app,sal.group,sal.cmd,sal.level,unit=sal.dev)
+                    continue
                 if self.ramps.enabled and self._has_pct_profile(sal.app,sal.group):
                     self._begin_ramp(sal.app,sal.group,sal.cmd,sal.level,observed=True)
                     self._cancel_pending_synthetic_level(sal.app,sal.group)
@@ -1189,3 +1208,124 @@ class CbusMqttBridge:
             if sals:
                 continue
             LOG.debug("Unparsed RX line: raw=%r norm=%s", raw, norm)
+
+
+class VirtualControls:
+    """Session-local control model, never a measurement of a physical load.
+
+    Only opted-in groups enter here. Full-scale ramp rates are estimated with a
+    monotonic clock; unknown starts remain unknown until an absolute command.
+    No sockets, timers, persistence, replay queues or writes back to the bus.
+    """
+    def __init__(self, bridge, clock=None):
+        import uuid
+        self.bridge=bridge
+        self.clock=clock or time.monotonic
+        self.lock=threading.RLock()
+        self.profiles={(p.app,p.group):p for p in bridge.profiles.values()
+                       if p.virtual_control_source is not None}
+        self.states={}
+        self.session=uuid.uuid4().hex
+        self.sequence=0
+        self.active=False
+
+    def contains(self, app, group): return (app,group) in self.profiles
+
+    def availability_topic(self,p):return f'cbus/read/{p.net}/{p.app}/{p.group}/control_availability'
+
+    def reset(self):
+        import uuid
+        with self.lock:
+            self.active=False;self.states.clear();self.session=uuid.uuid4().hex;self.sequence=0
+            for p in self.profiles.values():
+                self.bridge.mqtt.publish(self.availability_topic(p),payload='offline',qos=1,retain=True)
+
+    def ready(self):
+        with self.lock:self.active=True
+
+    def _sample(self,s,now):
+        ramp=s.get('ramp')
+        if ramp and s['level'] is not None:
+            start,target,at,seconds=ramp
+            delta=255*max(0,now-at)/seconds
+            s['level']=min(target,start+delta) if target>=start else max(target,start-delta)
+            if s['level']==target:s['ramp']=None
+
+    def _emit(self,p,s,action,*,force=False):
+        import json
+        level=None if s['level'] is None else clamp(round(s['level']),0,255)
+        pct=None if level is None else level255_to_pct(level,p.pct_scale)
+        if level and pct == 0:pct=1
+        if not force and pct==s.get('published_pct'):return
+        if action in ('level','stop') and pct and s.get('published_pct') in (None,0):action='on'
+        if pct is not None:
+            # Retained display state is separate from the non-retained action stream.
+            # QoS 0 avoids a Paho reconnect queue; availability invalidates old sessions.
+            info=self.bridge.mqtt.publish(self.bridge._topic_for(p,'level'),payload=str(pct),qos=0,retain=True)
+            if info.rc != mqtt.MQTT_ERR_SUCCESS:return
+            s['published_pct']=pct
+            if p.state_topic!=p.level_state_topic:
+                self.bridge.mqtt.publish(p.state_topic,payload='ON' if level else 'OFF',qos=0,retain=True)
+            if level:p.last_nonzero_255=level
+            self.bridge.diagnostics.published(p,level,'VIRTUAL_ESTIMATE' if s['estimated'] else 'VIRTUAL_COMMAND')
+            self.bridge.mqtt.publish(self.availability_topic(p),payload='online',qos=1,retain=True)
+        self.sequence+=1
+        event={'schema':1,'session':self.session,'sequence':self.sequence,
+               'action':action,'net':p.net,'app':p.app,'group':p.group,
+               'unit':s['unit'],'level':level,'percent':pct,'origin':s['origin'],
+               'ts':time.time(),'semantics':'virtual_command_model','estimated':s['estimated'],
+               'physical_confirmed':False,'ramping':s.get('ramp') is not None,
+               'command':s['last'][0] if s.get('last') else None}
+        self.bridge.mqtt.publish(f'cbus/bridge/controls/{p.net}/{p.app}/{p.group}/event',
+                                payload=json.dumps(event,separators=(',',':')),qos=0,retain=False)
+
+    def command(self,app,group,cmd,level,*,unit=None,origin='observed_command'):
+        with self.lock:
+            p=self.profiles.get((app,group))
+            if not p or not self.active:return False
+            if origin=='observed_command' and unit!=p.virtual_control_source:
+                self.bridge.diagnostics.bump('virtual_control_foreign_source_total');return False
+            now=self.clock()
+            s=self.states.setdefault((app,group),{'level':None,'ramp':None,'estimated':False,
+                'unit':unit,'origin':origin,'last':None,'last_at':float('-inf')})
+            signature=(cmd,level)
+            if s['last']==signature and now-s['last_at']<=1:
+                self.bridge.diagnostics.bump('virtual_control_duplicates_total');return False
+            # Repeated copies of an active ramp must not restart its clock.
+            rate={v:k for k,v in RAMP_CODES.items()}.get(cmd)
+            if s['ramp'] and rate and s['ramp'][1]==level and s['ramp'][3]==rate:return False
+            moving_before = s['ramp'] is not None
+            self._sample(s,now)
+            before=s['level'];was_on=before is not None and before>0
+            s.update(last=signature,last_at=now,unit=unit,origin=origin)
+            if cmd==0x09:
+                moving=moving_before
+                s['ramp']=None
+                if moving or before is None:self._emit(p,s,'stop',force=True)
+                return True
+            target=255 if cmd==0x79 else 0 if cmd==0x01 else level
+            seconds=0 if cmd in (0x79,0x01) else rate
+            if seconds is None or target is None:return False
+            if seconds and before is None:
+                # The bus supplies a target, not a current level. Do not invent an
+                # initial volume or jump to a high endpoint while a button is held.
+                s['ramp']=None;s['estimated']=True
+                self._emit(p,s,'unknown_ramp',force=True)
+                return True
+            s['ramp']=None
+            if seconds and before!=target:
+                s['ramp']=(before,target,now,seconds);s['estimated']=True
+                return True
+            s['level']=target;s['estimated']=False
+            action='off' if target==0 else 'on' if not was_on else 'level'
+            if target!=before:self._emit(p,s,action)
+            return True
+
+    def tick(self):
+        with self.lock:
+            if not self.active:return
+            now=self.clock()
+            for key,s in self.states.items():
+                if s['ramp']:
+                    self._sample(s,now)
+                    self._emit(self.profiles[key],s,'off' if s['level']==0 else 'level')
