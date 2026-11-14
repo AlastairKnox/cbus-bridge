@@ -38,11 +38,15 @@ if __name__=='__main__':
                 inject('056E380079FAE2');wait(lambda:broker.latest.get(level_topic)=='100')
                 wait(lambda:event().get('action')=='on');first=event();inject('056E380079FAE2')
                 time.sleep(.2);assert event()==first
+                broker.command('cbus/write/254/56/250/ramp','50')
+                wait(lambda:broker.latest.get(level_topic)=='50')
+                wait(lambda:event().get('action')=='level' and event().get('origin')=='transmitted_command')
+                out['ha_reset_to_50_is_level_feedback_without_replaying_on']='passed'
                 inject('056E38000AFAFF52');inject('056E380002FA6DEC')
                 wait(lambda:broker.latest.get(level_topic)=='43');wait(lambda:event().get('level')==109)
                 assert event()['physical_confirmed'] is False
                 out['captured_edlt_frames_to_normal_mqtt_level_and_fresh_event']='passed'
-                assert broker.latest.get(availability)=='online'
+                wait(lambda:broker.latest.get(availability)=='online')
                 cni.send(frame(bytes([5,110,56,0,2,13,109])))
                 time.sleep(.3);assert 'cbus/read/254/56/13/level' not in broker.latest
                 out['physical_load_still_waits_for_status']='passed'
