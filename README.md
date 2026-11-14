@@ -15,6 +15,7 @@ C-Bus lights, dimmers, switches and sensors
                     ↕
        Home Assistant / MQTT clients
 ```
+This project uses OpenAI ChatGPT and Codex to assist with development, testing and documentation. The maintainer directs development, reviews changes and validates releases against a working C-Bus installation.
 
 ## What makes it useful
 
