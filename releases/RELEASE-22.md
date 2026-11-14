@@ -8,7 +8,8 @@ invalidates the virtual session; action events are never retained or replayed.
 
 The separate HA example replaces the competing on/dimmer/off handlers with one
 fresh-event coordinator and cancellable startup script. Normal volume stays
-0.12..0.5, startup cannot raise a known quieter setting, and the existing 0.65 hard
+0.12..0.5. Startup sends a 50% level back to the eDLT and sets MA volume to 50%,
+with newer deliberate dimmer input taking precedence. The existing 0.65 hard
 cap is retained and extended to MA. Cached light state cannot start music.
 
 This release is based on c244163 and deliberately excludes the still-uncommitted

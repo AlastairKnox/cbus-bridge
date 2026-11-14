@@ -84,20 +84,28 @@ fresh events, not `light.stereo` state/brightness or diagnostic history, to avoi
 startup replay. A persisted session/sequence/timestamp key rejects duplicate,
 out-of-order and old MQTT events; events older than ten seconds are ignored.
 
-Startup plays Favourites through MA, enables shuffle/repeat, and limits initial
-volume to the smaller of requested volume, both available player readings and
-0.5. Unknown readings default to 0.12; an existing quieter level is not raised.
-Subsequent deliberate dimming maps raw 0..255 to 0.12..0.5, preserving the previous
-safe range. New volume requests during startup are coalesced into the helper and
-applied after startup rather than racing its initial volume. OFF cancels startup,
-stops/powers off MA, then explicitly powers off the physical Yamaha zone.
+A fresh ON first sends a non-retained numeric `50` to the group's ramp topic.
+The bridge's ACK-success feedback changes the virtual level from 100% to 50% and
+emits a **level** event, not another ON. The eDLT can receive that group-level
+command; its actual display/indicator behavior requires physical acceptance.
+Startup waits for a newer accepted control event, then powers the players and
+sets MA volume to 0.5 before playing Favourites, enabling shuffle and repeat.
+A more recent deliberate volume request during startup wins instead. OFF cancels
+startup, stops/powers off MA, then explicitly powers off the physical Yamaha zone.
+
+Wall percentage maps directly to player percentage, with a 0.12 floor and the
+existing 0.5 normal-control ceiling: 50% on the eDLT means 50% player volume.
+Positions above 50% do not raise volume beyond that ceiling. This differs from
+the earlier draft's half-scale mapping (which made wall 50% equal player 25%).
+There is exactly one startup level write; its ACK/observed echo does not replay
+ON, restart the playlist or write another level back to C-Bus.
 An independent hard cap remains 0.65 on both MA and its physical output.
 
 The three old on/dimmer/off automations must be disabled when enabling this
 replacement. Their original definitions/IDs may be retained with
 `initial_state: false`. The old hard-cap automation is extended rather than
-removed. The included helper states/script are excluded from Recorder. No reverse
-player-to-C-Bus synchronization is added, avoiding command loops.
+removed. The included helper states/script are excluded from Recorder. The only reverse C-Bus write is the explicit one-time 50% startup command;
+continuous player-state-to-C-Bus synchronization is not added.
 
 After HA restart, control-active starts false: no music restarts automatically.
 If the bridge's logical control was already ON, use OFF then ON to explicitly

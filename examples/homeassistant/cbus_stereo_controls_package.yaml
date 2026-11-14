@@ -22,11 +22,19 @@ script:
       start_event:
         description: Accepted event ID, used to detect a newer volume request.
     sequence:
-    - variables:
-        start_volume: >-
-          {{ [0.5, states('input_number.stereo_requested_volume') | float(0.12),
-              state_attr('media_player.big_room', 'volume_level') | float(0.12),
-              state_attr('media_player.media_room_zone2', 'volume_level') | float(0.12)] | min }}
+    - condition: state
+      entity_id: input_boolean.stereo_control_active
+      state: 'on'
+    # Reset the eDLT's ON=100% level without replaying a second ON action.
+    - action: mqtt.publish
+      data:
+        topic: cbus/write/254/56/250/ramp
+        payload: '50'
+        qos: 0
+        retain: false
+    - wait_template: "{{ states('input_text.stereo_control_last_event') != start_event }}"
+      timeout: '00:00:05'
+      continue_on_timeout: false
     - condition: state
       entity_id: input_boolean.stereo_control_active
       state: 'on'
@@ -49,7 +57,7 @@ script:
       target:
         entity_id: media_player.big_room
       data:
-        volume_level: '{{ [0, start_volume | float(0.12)] | max }}'
+        volume_level: '{{ [0.5, [0.12, states("input_number.stereo_requested_volume") | float(0.5)] | max] | min }}'
     - action: music_assistant.play_media
       target:
         entity_id: media_player.big_room
@@ -117,7 +125,7 @@ automation:
   actions:
   - variables:
       event: '{{ trigger.payload_json }}'
-      target_volume: '{{ [0.5, [0.12, (trigger.payload_json.level | float(0) / 255) * 0.5] | max] | min }}'
+      target_volume: '{{ [0.5, [0.12, (trigger.payload_json.level | float(0) / 255)] | max] | min }}'
       event_id: >-
         {{ trigger.payload_json.session ~ ':' ~ trigger.payload_json.sequence ~ ':' ~ trigger.payload_json.ts }}
   - action: input_text.set_value

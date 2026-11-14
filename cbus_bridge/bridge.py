@@ -410,7 +410,7 @@ class CbusMqttBridge:
         """
         if p.virtual_control_source is not None:
             if source == 'ACK':
-                self.virtual_controls.command(p.app,p.group,RAMP_CODES[0],level255,origin='transmitted_command')
+                self.virtual_controls.acknowledge(p.app,p.group,RAMP_CODES[0],level255)
             return
         if source == 'STATUS' and (p.net,p.app,p.group) == self._duration_key:
             self._duration_level = int(level255)
@@ -580,6 +580,7 @@ class CbusMqttBridge:
                 watch = self._begin_ramp(app_byte,group,cmd,level)
                 if watch is not None:
                     self._cancel_pending_synthetic_level(app_byte,group)
+                self.virtual_controls.capture_write(app_byte,group)
                 self.cni.send_hex_frame(payload)
             try:
                 self._guarded(send_command)
@@ -757,8 +758,7 @@ class CbusMqttBridge:
             self._guarded(record, expire=False)
             if profile.virtual_control_source is not None:
                 cmd = 0x09 if action == 'stop' else RAMP_CODES[seconds]
-                self._guarded(lambda:self.virtual_controls.command(profile.app,profile.group,cmd,target,
-                    origin='transmitted_command'),expire=False)
+                self._guarded(lambda:self.virtual_controls.acknowledge(profile.app,profile.group,cmd,target),expire=False)
             # These opt-in commands do not publish a target as current brightness,
             # even at rate zero: only subsequent monitored/status traffic does.
 
@@ -1225,11 +1225,26 @@ class VirtualControls:
         self.profiles={(p.app,p.group):p for p in bridge.profiles.values()
                        if p.virtual_control_source is not None}
         self.states={}
+        self.observations={key:0 for key in self.profiles}
         self.session=uuid.uuid4().hex
         self.sequence=0
         self.active=False
 
     def contains(self, app, group): return (app,group) in self.profiles
+
+    def capture_write(self,app,group):
+        with self.lock:
+            self.bridge._command_local.virtual_token=(app,group,self.session,self.observations[(app,group)]) if (app,group) in self.profiles else None
+
+    def acknowledge(self,app,group,cmd,level):
+        with self.lock:
+            token=getattr(self.bridge._command_local,'virtual_token',None)
+            if token and token[:2]==(app,group):
+                self.bridge._command_local.virtual_token=None
+                if token[2:]!=(self.session,self.observations[(app,group)]):
+                    self.bridge.diagnostics.bump('virtual_control_superseded_acks_total')
+                    return False
+            return self.command(app,group,cmd,level,origin='transmitted_command')
 
     def availability_topic(self,p):return f'cbus/read/{p.net}/{p.app}/{p.group}/control_availability'
 
@@ -1295,6 +1310,7 @@ class VirtualControls:
             rate={v:k for k,v in RAMP_CODES.items()}.get(cmd)
             if s['ramp'] and rate and s['ramp'][1]==level and s['ramp'][3]==rate:return False
             moving_before = s['ramp'] is not None
+            if origin=='observed_command':self.observations[(app,group)]+=1
             self._sample(s,now)
             before=s['level'];was_on=before is not None and before>0
             s.update(last=signature,last_at=now,unit=unit,origin=origin)

@@ -159,3 +159,33 @@ class VirtualTests(unittest.TestCase):
             self.command(2,109 if n%2 else 0)
         self.assertEqual(len(self.v.states),1)
         self.assertLess(len(json.dumps(self.v.states[(56,250)])),600)
+
+
+    def test_on_then_ha_resets_wall_to_half_without_restarting_or_echo_loop(self):
+        self.command(0x79)
+        self.b.write_ramp_to_level=Mock(return_value=True)
+        self.b.handle_mqtt_command(self.p.level_command_topic,b'50')
+        self.assertEqual(self.levels(),['100','50'])
+        self.assertEqual([e['action'] for e in self.events()],['on','level'])
+        self.assertEqual(self.events()[-1]['origin'],'transmitted_command')
+        self.command(2,128)
+        self.assertEqual(len(self.events()),2)
+        self.assertEqual(self.levels(),['100','50'])
+
+
+    def test_later_edlt_volume_or_stop_supersedes_inflight_startup_reset_ack(self):
+        self.command(0x79)
+        self.v.capture_write(56,250)
+        self.command(2,109)
+        self.assertFalse(self.v.acknowledge(56,250,2,128))
+        self.assertEqual(self.levels(),['100','43'])
+        self.v.capture_write(56,250)
+        self.command(9)
+        self.assertFalse(self.v.acknowledge(56,250,2,128))
+        self.assertEqual(self.levels()[-1],'43')
+
+    def test_filtered_bus_echo_does_not_suppress_valid_reset_ack(self):
+        self.command(0x79);self.v.capture_write(56,250)
+        self.command(2,128,unit=2)
+        self.assertTrue(self.v.acknowledge(56,250,2,128))
+        self.assertEqual(self.levels(),['100','50'])
