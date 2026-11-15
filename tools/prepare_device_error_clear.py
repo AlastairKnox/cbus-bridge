@@ -55,7 +55,7 @@ def artifacts(config):
     card={'type':'vertical-stack','cards':[
         {'type':'markdown','content':'### Clear latched device errors\nSelect one unit, then confirm. This clears **all** its latched error flags. The bridge saves the old flags and verifies the result. A failed or uncertain attempt is never retried automatically.'},
         {'type':'entities','entities':[support,'input_select.'+selector]},
-        {'type':'button','name':'Request clear for selected unit','icon':'mdi:notification-clear-all',
+        {'type':'button','name':'Request clear for selected unit','icon':'mdi:notification-clear-all','icon_height':'32px',
          'tap_action':{'action':'perform-action','perform_action':'script.'+script,
                        'confirmation':{'text':'Clear all latched error flags on the selected C-Bus unit? The saved audit will retain the previous flags.'}},
          'hold_action':{'action':'none'}},
