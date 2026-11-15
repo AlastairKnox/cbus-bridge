@@ -270,7 +270,8 @@ class ClearHaTests(unittest.TestCase):
         action=package['script']['cbus_clear_selected_unit_errors']['sequence'][-1]
         self.assertFalse(action['data']['retain']);self.assertEqual(action['data']['qos'],0)
         self.assertIn('request_id',action['data']['payload']);self.assertIn('now().timestamp()',action['data']['payload'])
-        sensors=package['mqtt']['sensor'];self.assertEqual(len(sensors),5)
+        sensors=package['mqtt']['sensor'];self.assertEqual(len(sensors),6)
+        self.assertTrue(any(s['default_entity_id']=='sensor.cbus_device_error_clear_request' for s in sensors))
         self.assertTrue(all('json_attributes_topic' not in s for s in sensors))
         self.assertTrue(all(s['expire_after']==90 for s in sensors))
         self.assertIn('sensor.cbus_unit_*_error_clear_attempt',package['recorder']['exclude']['entity_globs'])

@@ -1,6 +1,8 @@
 # Manual clearing of latched unit errors
 
-Release 24 finalizes the Release 21 candidate as opt-in, one-unit-at-a-time clearing. Routine monitoring still
+Release 24 introduced opt-in, one-unit-at-a-time clearing. Release 25 adds
+a bounded waiting slot so confirmed requests do not have to race background
+monitoring cooldowns. Routine monitoring still
 never clears errors. Clearing applies to **all latched error bits on that unit**,
 not just communications TX errors. It cannot repair a bus problem or undo history.
 The old flags are saved before the command; they cannot be written back into the
@@ -20,14 +22,21 @@ broadcasts or a routed request. IDENTIFY `$04` supplies the health readback.
 
 ## Transaction and failure behavior
 
-The target must be a reviewed roster entry with capability `full`. The existing
-command path must be ready, writable, idle for inventory and outside its 30-second
-cooldown. One operation occupies the inventory manager for at most 60 seconds.
+The target must be a reviewed roster entry with capability `full`. The command path must be ready and writable. A confirmed request can be
+admitted during another inventory job or its 30-second cooldown. Exactly one
+manual intent waits, for at most 60 seconds, before fresh preflight begins.
+Background monitoring cannot start another job ahead of that waiting intent.
+The existing inventory job is allowed to finish; lighting and ramps still take
+priority. Once started, the clear transaction has its own 60-second deadline
+(at most 120 seconds including waiting).
 It uses the existing CNI connection and command worker, yields to lighting and
 ramps, and shares the three-second background query budget. It does not open a
 second connection, add a timer/thread, or automatically scan other units.
 
-1. Persist admission and consume the request ID.
+1. Persist admission in `waiting` and consume the request ID before waiting.
+   The existing metrics/worker path starts it after the inventory job and
+   cooldown finish. Expired waiting requests become `waiting_expired` without
+   any clear write. There is no second request or repeated clear submission.
 2. Request a fresh IDENTIFY `$04` reading, requiring the expected source,
    interface destination and attribute within three seconds. No voltage fallback.
 3. Persist the old flags and a write-attempt checkpoint before sending RESET once.
@@ -46,6 +55,7 @@ No reply, disconnect, cancellation, send exception or audit failure leaves the
 old baseline intact. After a write attempt the result must be treated as uncertain
 unless it is `verified_clear` or a valid `flags_remaining` readback. `sent_ts`
 records that the socket may have been written, even when an exception followed.
+Disconnect or an explicit inventory cancel also drops a waiting intent.
 Restart marks incomplete records `interrupted_before_send` or
 `interrupted_unverified`, never resumes them, and never sends anything on behalf
 of an old request. Fresh monitoring is still required after reconnect/restart.
@@ -105,15 +115,24 @@ The HA script generates epoch microseconds. Clock reversal or a manually supplie
 future ID can cause rejection; review the saved high-water mark rather than
 resetting it. Retransmissions and retained commands cannot trigger another clear.
 Rejected requests use `device_error_clear_rejected` in ordinary command diagnostics.
-Busy requests are rejected, not silently queued for a future unattended clear.
+A second clear request is rejected while one is waiting/running; it never
+replaces the first. An accepted waiting request is visible immediately and can
+start only within its bounded 60-second window. It is discarded on disconnect
+or restart, not resumed later. Requests still reject when disabled, unready,
+readonly, invalid or using a consumed ID.
 
 Existing `cbus/bridge/devices/<unit>/state` gains `error_clear_enabled` and
 `last_clear` (null or the latest persisted record). A record includes request ID,
 requested timestamp, outcome, before/after raw flags where observed, sent timestamp
 where attempted, and completion timestamp where finished. Existing latched/new
-flag and voltage fields continue. Summary `cbus/bridge/device_monitor` gains
-`error_clear_enabled`. These states remain non-retained with 30-second heartbeats;
-allow up to 30 seconds for the dashboard result. Once verified, a returning TX
+flag and voltage fields continue. Summary `cbus/bridge/device_monitor` includes `error_clear_enabled` and
+`error_clear_request`, a bounded latest-request object with unit, request ID,
+request time, state and rejection reason. It is separate from the per-unit
+audit: rejecting a second request must not overwrite a first operation's audit.
+These states remain non-retained with 30-second heartbeats; request and audit
+progress also trigger prompt publication. The HA scalar **Last clear request**
+shows waiting/progress or the actual rejection reason. A restarted bridge does
+not restore this ephemeral latest-request view, but the per-unit audit remains. Once verified, a returning TX
 bit is reported as a new error even across restart.
 
 ## Additive HA controls (prepare first; install separately)
@@ -131,7 +150,7 @@ to the current Devices view. Do not regenerate/overwrite the existing device vie
 from an earlier release, since its layout has since been tidied.
 
 The card selects one full-capability unit, then requires confirmation on the
-request button. It shows outcomes for all eligible units. The script publishes
+request button. It shows the latest request status/rejection and outcomes for all eligible units. The script publishes
 one fresh ID with `retain: false`; it does not loop over units. Confirmation is a
 UI safeguard, not authorization against other clients with MQTT write access.
 
@@ -153,3 +172,19 @@ then use the confirmed action for that unit only. Expect `verified_clear`, zero
 flags and a persisted zero baseline. A `flags_remaining` result is diagnostic
 evidence, not permission for repeated automatic clears. Compare ordinary monitoring
 over the next 24–48 hours; a returning communications TX bit warrants investigation.
+
+## Updating an existing Release 24 installation
+
+Keep the existing audit path, environment, roster and flags. Do not delete or
+reset the audit. Use the normal backed-up check/apply for Release 25; no new
+service environment setting is needed. Archive the latest audit before rollback.
+The old release cannot interpret new `waiting`/`waiting_expired` audit states:
+if rolled back with such an audit, it disables clearing rather than replaying or
+discarding it. Normal lighting and monitoring remain available. Preserve the audit
+and review compatibility before re-enabling clears on older code.
+
+Regenerate the additive HA artifacts. The package adds one Last clear request
+sensor; keep the existing scripts, selector and outcomes. Add that row to the
+existing clear controls and retain the fixed 32px button icon. Do not replace the
+rest of the dashboard. HA validation and MQTT YAML reload can load the new sensor;
+no new Recorder exclusion or HA restart is needed solely for this scalar sensor.

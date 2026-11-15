@@ -31,6 +31,11 @@ def artifacts(config):
         'default_entity_id':support,'state_topic':'cbus/bridge/device_monitor','expire_after':90,
         'value_template':"{{ 'enabled' if value_json.error_clear_enabled | default(false) else 'disabled' }}",
         'availability':available,'entity_category':'diagnostic'}]
+    request_sensor='sensor.cbus_device_error_clear_request'
+    sensors.append({'name':'Last clear request','unique_id':'cbus_device_error_clear_request',
+        'default_entity_id':request_sensor,'state_topic':'cbus/bridge/device_monitor','expire_after':90,
+        'availability':available,'entity_category':'diagnostic',
+        'value_template':"{% set r = value_json.error_clear_request | default(none) %}{{ ('Unit ' ~ r.unit ~ ': ' ~ (r.reason if r.state == 'rejected' else r.state)) if r is mapping else 'none' }}"})
     for d in devices:
         u=d['unit'];topic=f'cbus/bridge/devices/{u}/state';prefix=f'cbus_unit_{u}'
         sensors.append({'name':'Last error clear outcome','unique_id':prefix+'_error_clear_outcome',
@@ -53,8 +58,8 @@ def artifacts(config):
     for d in devices:
         table.append(f"| {d['unit']} | {d['type']} | {{{{ states('sensor.cbus_unit_{d['unit']}_error_clear_outcome') | replace('_',' ') }}}} |")
     card={'type':'vertical-stack','cards':[
-        {'type':'markdown','content':'### Clear latched device errors\nSelect one unit, then confirm. This clears **all** its latched error flags. The bridge saves the old flags and verifies the result. A failed or uncertain attempt is never retried automatically.'},
-        {'type':'entities','entities':[support,'input_select.'+selector]},
+        {'type':'markdown','content':'### Clear latched device errors\nSelect one unit, then confirm. This clears **all** its latched error flags. The bridge accepts one request, waits up to 60 seconds for the diagnostic slot, then saves the old flags and verifies the result. Waiting expires on disconnect/restart. A failed or uncertain clear is never retried.'},
+        {'type':'entities','entities':[support,request_sensor,'input_select.'+selector]},
         {'type':'button','name':'Request clear for selected unit','icon':'mdi:notification-clear-all','icon_height':'32px',
          'tap_action':{'action':'perform-action','perform_action':'script.'+script,
                        'confirmation':{'text':'Clear all latched error flags on the selected C-Bus unit? The saved audit will retain the previous flags.'}},

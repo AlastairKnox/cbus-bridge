@@ -1026,6 +1026,7 @@ class DeviceInventory:
         self.presence = {'state':'not_requested'}
         self.presence_slots = {}
         self.error_store = None
+        self.clear_waiting = None
 
     def _change(self):
         self.version += 1
@@ -1046,6 +1047,10 @@ class DeviceInventory:
         with self.lock:
             if spec == 'cancel':
                 self.cancel('cancelled'); return True
+            if self.clear_waiting is not None:
+                self.last_request_error = 'clear_already_waiting'
+                self.diagnostics.bump('inventory_requests_rejected_total'); self._change()
+                return False
             if spec == 'interface':
                 if self.interface_unit is None:
                     self.last_request_error = 'interface_address_unknown'
@@ -1106,22 +1111,61 @@ class DeviceInventory:
             return True
 
     def request_error_clear(self, unit, request_id, ready, readonly=False):
-        """One explicit transaction, sharing the inventory worker and pacing gates."""
+        """Durably admit one bounded manual intent; never replay it on recovery."""
         with self.lock:
             store = self.error_store
-            if not store or not store.enabled:
-                self.last_request_error = 'error_clear_disabled'; return False
-            # request() performs the ordinary readiness, busy and cooldown checks.
-            if not self.request({'health':[unit]}, ready, readonly): return False
+            reason = ('error_clear_disabled' if not store or not store.enabled else
+                      'readonly' if readonly else
+                      'command_path_not_ready' if not ready else
+                      'interface_address_unknown' if self.interface_unit is None else
+                      'clear_already_pending' if self.clear_waiting is not None or
+                      (self.job['state'] == 'running' and self.job.get('mode') == 'clear_errors') else None)
+            if reason:
+                self.last_request_error = reason; self._change(); return False
             try:
-                store.begin(unit, request_id)
+                # Consume the ID before waiting. A crash cannot resurrect this intent.
+                store.begin(unit, request_id, waiting=True)
             except (OSError, ValueError):
-                self.cancel('clear_admission_failed')
-                self.last_request_error = 'clear_state_or_request_id_invalid'; return False
-            self.job.update(mode='clear_errors', phase='preflight', request_id=request_id,
-                            deadline=self.clock()+60)
+                self.last_request_error = 'clear_state_or_request_id_invalid'; self._change(); return False
+            self.clear_waiting = {'unit':unit, 'request_id':request_id,
+                                  'deadline':self.clock()+60}
+            self.last_request_error = None
             self._change()
-            return True
+            self._start_waiting_clear()
+            return (self.clear_waiting is not None or
+                    (self.job.get('mode') == 'clear_errors' and
+                     self.job.get('request_id') == request_id and self.job['state'] == 'running'))
+
+    def _finish_waiting_clear(self, outcome):
+        intent, self.clear_waiting = self.clear_waiting, None
+        if intent is None: return
+        try:
+            self.error_store.finish(intent['unit'], outcome)
+        except OSError:
+            LOG.error('Error-clear audit could not be saved; clearing disabled')
+        self._change()
+
+    def _start_waiting_clear(self):
+        intent = self.clear_waiting
+        if intent is None: return
+        if self.clock() >= intent['deadline']:
+            self._finish_waiting_clear('waiting_expired'); return
+        if self.job['state'] == 'running' or self.clock() < self.last_start+30: return
+        if self.interface_unit is None:
+            self._finish_waiting_clear('connection_lost'); return
+        # Only this admission path may move a waiting intent into the inventory job.
+        self.clear_waiting = None
+        if not self.request({'health':[intent['unit']]}, True):
+            self.clear_waiting = intent
+            self._finish_waiting_clear('cancelled'); return
+        self.job.update(mode='clear_errors', phase='preflight', request_id=intent['request_id'],
+                        deadline=self.clock()+60)
+        try:
+            self.error_store.activate(intent['unit'], intent['request_id'])
+        except (OSError, ValueError):
+            self.cancel('clear_persistence_failed')
+            self.last_request_error = 'clear_state_or_request_id_invalid'
+        self._change()
 
     def _clear_result(self, token, value):
         """A fresh read is required on each side; no retries of the write."""
@@ -1162,6 +1206,7 @@ class DeviceInventory:
 
     def cancel(self, reason='connection_lost'):
         with self.lock:
+            self._finish_waiting_clear(reason)
             if self.job['state'] == 'running':
                 if self.job.get('mode') == 'clear_errors':
                     try:
@@ -1233,6 +1278,7 @@ class DeviceInventory:
     def reserve(self):
         with self.lock:
             now = self.clock()
+            self._start_waiting_clear()
             if self.job['state'] != 'running': return None
             if now >= self.job['deadline']:
                 self.cancel('survey_deadline'); return None
@@ -1391,6 +1437,10 @@ class DeviceInventory:
                     'bridge_start_ts':self.bridge_start_ts,
                     'interface_unit':self.interface_unit, 'observed_units':sorted(self.observed),
                     'job':copy.deepcopy(job), 'last_request_error':self.last_request_error,
+                    'clear_waiting':({'unit':self.clear_waiting['unit'],
+                        'request_id':self.clear_waiting['request_id'],
+                        'remaining_s':max(0,round(self.clear_waiting['deadline']-self.clock(),1))}
+                        if self.clear_waiting else None),
                     'presence':copy.deepcopy(self.presence),
                     'pending':{k:self.pending[k] for k in ('unit','attribute','kind')} if self.pending else None,
                     'devices':copy.deepcopy([self.rows[u] for u in sorted(self.rows)])}
@@ -1421,6 +1471,8 @@ class DeviceMonitor:
         self.valid_session = set()
         self.next_publish = 0
         self.error_store = None
+        self.clear_request = None
+        self.clear_store_version = None
 
     def enable_error_clearing(self, path):
         # Invalid/unwritable audit state disables only clearing, not normal monitoring.
@@ -1433,13 +1485,32 @@ class DeviceMonitor:
 
     def clear_errors(self, spec, ready, readonly=False):
         with self.lock:
-            if (not isinstance(spec,dict) or set(spec) != {'unit','request_id','confirm'} or
-                    spec['confirm'] is not True or type(spec['unit']) is not int or
-                    spec['unit'] not in self.devices or
-                    self.devices[spec['unit']]['capability'] != 'full' or
-                    type(spec['request_id']) is not int or not 1 <= spec['request_id'] <= 9007199254740991):
-                return False
-            return self.inventory.request_error_clear(spec['unit'],spec['request_id'],ready,readonly)
+            valid = (isinstance(spec,dict) and set(spec) == {'unit','request_id','confirm'} and
+                     spec['confirm'] is True and type(spec['unit']) is int and
+                     spec['unit'] in self.devices and self.devices[spec['unit']]['capability'] == 'full' and
+                     type(spec['request_id']) is int and 1 <= spec['request_id'] <= 9007199254740991)
+            unit = spec.get('unit') if isinstance(spec,dict) and type(spec.get('unit')) is int else None
+            request_id = spec.get('request_id') if isinstance(spec,dict) and type(spec.get('request_id')) is int else None
+            self.clear_request = {'unit':unit if unit in self.devices else None,
+                                  'request_id':request_id if request_id is not None and
+                                  1 <= request_id <= 9007199254740991 else None,
+                                  'requested_ts':int(self.wall()), 'state':'rejected',
+                                  'reason':'invalid_clear_request'}
+            self.next_publish = 0
+            if not valid: return False
+            accepted = self.inventory.request_error_clear(spec['unit'],spec['request_id'],ready,readonly)
+            self.clear_request.update(state='accepted' if accepted else 'rejected',
+                reason=None if accepted else self.inventory.last_request_error)
+            return accepted
+
+    def clear_request_snapshot(self):
+        if self.clear_request is None: return None
+        result = dict(self.clear_request)
+        if result['state'] == 'accepted' and self.error_store:
+            record = self.error_store.record(result['unit'])
+            if record and record['request_id'] == result['request_id']:
+                result['state'] = record['outcome']
+        return result
 
     @staticmethod
     def validate(config):
@@ -1494,6 +1565,9 @@ class DeviceMonitor:
             if not ready:
                 self.valid_session.clear()
             view=self.inventory.snapshot()
+            if self.error_store and self.clear_store_version != self.error_store.version:
+                self.clear_store_version = self.error_store.version
+                self.next_publish = 0
             for row in view['devices']:
                 u=row['unit'];h=row.get('health',{})
                 if u not in self.devices or not h or h.get('outcome') == 'pending': continue
@@ -1504,6 +1578,7 @@ class DeviceMonitor:
                     if ready: self.valid_session.add(u)
             if (not self.supported or readonly or not ready or now < self.next_launch or
                     view['interface_unit'] is None or view['job']['state'] == 'running' or
+                    view.get('clear_waiting') is not None or
                     now < self.inventory.last_start+30):
                 return
             units=self.supported if self.refresh_pending else sorted(
@@ -1552,6 +1627,7 @@ class DeviceMonitor:
                 'schema':1,'enabled':bool(self.config),'devices':len(self.devices),'polled_devices':len(self.supported),
                 'refresh_pending':self.refresh_pending,'refresh_seconds':self.period,
                 'error_clear_enabled':bool(self.error_store and self.error_store.enabled),
+                'error_clear_request':self.clear_request_snapshot(),
                 'cycle_seconds_minimum':max(self.period,int(self.spacing*len(self.supported))),
                 'fresh':sum(v['status']=='fresh' for v in states.values())}),qos=0,retain=False)
             for u,row in states.items():
@@ -1564,7 +1640,7 @@ class DeviceErrorStore:
     Only verified zero readbacks replace a baseline. Uncertain writes are never
     retried, including after restart. The caller serializes inventory operations.
     """
-    ACTIVE = ('preflight','prepared','sent_unverified')
+    ACTIVE = ('waiting','preflight','prepared','sent_unverified')
 
     def __init__(self, path, config, wall=None):
         import hashlib, json, threading, time
@@ -1577,6 +1653,7 @@ class DeviceErrorStore:
         self.units = {str(d['unit']) for d in config['devices'] if d['capability'] == 'full'}
         self.data = {'schema':1,'roster_hash':self.roster_hash,'last_request_id':0,'baselines':{},'records':{}}
         self.enabled = True
+        self.version = 0
         if self.path.is_symlink(): raise ValueError('Symlinked audit path')
         if self.path.exists():
             if self.path.stat().st_size > 262144: raise ValueError('Audit too large')
@@ -1601,7 +1678,7 @@ class DeviceErrorStore:
         allowed={'request_id','requested_ts','outcome','before_flags','after_flags','sent_ts','completed_ts'}
         outcomes=set(self.ACTIVE) | {'verified_clear','flags_remaining','preflight_no_reply',
             'unverified_no_reply','interrupted_unverified','interrupted_before_send','connection_lost',
-            'cancelled','survey_deadline','send_failed','clear_persistence_failed','audit_failed'}
+            'cancelled','survey_deadline','send_failed','clear_persistence_failed','audit_failed','waiting_expired'}
         for r in d['records'].values():
             if (not isinstance(r,dict) or not {'request_id','requested_ts','outcome'} <= set(r) <= allowed or
                     r['outcome'] not in outcomes or type(r['request_id']) is not int or
@@ -1642,12 +1719,22 @@ class DeviceErrorStore:
                         record.update(outcome='audit_failed',completed_ts=int(self.wall()))
                 raise
             self.data=data
+            self.version += 1
 
-    def begin(self, unit, request_id):
+    def begin(self, unit, request_id, *, waiting=False):
         def change(d):
             if request_id <= d['last_request_id']: raise ValueError('Replayed request')
             d['last_request_id']=request_id
-            d['records'][str(unit)]={'request_id':request_id,'requested_ts':int(self.wall()),'outcome':'preflight'}
+            d['records'][str(unit)]={'request_id':request_id,'requested_ts':int(self.wall()),
+                                     'outcome':'waiting' if waiting else 'preflight'}
+        self._commit(change)
+
+    def activate(self, unit, request_id):
+        def change(d):
+            record = d['records'].get(str(unit))
+            if not record or record['request_id'] != request_id or record['outcome'] != 'waiting':
+                raise ValueError('No matching waiting clear')
+            record['outcome'] = 'preflight'
         self._commit(change)
 
     def prepare(self, unit, before):
