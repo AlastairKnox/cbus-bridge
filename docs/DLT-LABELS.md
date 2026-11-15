@@ -1,8 +1,9 @@
 # Dynamic text labels for the original Saturn DLT
 
 This feature sends text from MQTT through the existing bridge/CNI connection.
-It does not implement playlist selection: group 91's 50%/90% button commands remain
-separate inputs for future playlist work. It never changes a lighting level.
+The bridge does not choose playlists. The accompanying
+[HA example](STEREO-PLAYLISTS.md) now handles group 91's 50%/90% button commands
+separately and publishes the selected display name. A label never changes a lighting level.
 
 ## Opt in one label address
 
@@ -20,7 +21,9 @@ An HA lighting profile is not required for a label-only target. Only local netwo
 Check the intended DLT key's group, dynamic-label setting, language and variant
 in Toolkit. This installation uses group 91 and English. The updated project
 report confirms key 8 has Idle / Recall 1 / Recall 2 / Idle, at 50%/90%.
-Its label variant and the exact original displayed text still need confirmation.
+The live HA controls use language 1 and variant 1; the user confirmed that
+dynamic labels display correctly. When adapting this setup, verify the intended
+variant and record the original text before changing another key.
 
 Labels are broadcast by group/language/variant, not addressed to unit 110 or to
 screen row 8. Every matching dynamically labelled key can update. Keep a project
@@ -94,7 +97,17 @@ brightness, switch or virtual stereo-control actions. Mixed packets preserve act
 lighting commands while skipping label bytes. Unsupported label formats still
 reject the whole packet rather than interpreting their contents as commands.
 
-## First live acceptance (not yet performed)
+## Acceptance recorded — 15 November 2026
+
+Release `ae85be20450e6a3fad243028fbd67f573f038afa` was deployed by the user.
+The user successfully sent labels through HA and confirmed the text on the
+physical original Saturn DLT. The later playlist selector also passed the user's
+physical-switch/playback checks. These observations confirm this installation,
+not every DLT language/variant or unsupported display format.
+
+See [the HA configuration and exact acceptance scope](STEREO-PLAYLISTS.md).
+
+## Acceptance checklist for a new installation
 
 1. Record the current text and confirm the label variant; inspect other keys
    using the same group/variant. Back up Toolkit's project.
@@ -112,7 +125,8 @@ Removing the environment setting disables further MQTT label writes but does not
 restore labels already displayed. Restoring the old bridge release likewise does
 not undo a label broadcast; use a fresh label write or Toolkit to restore the text.
 No HA reload is required for manually publishing labels. Playlist automations
-and a dashboard can follow after the single-label physical test succeeds.
+are captured in the accompanying example; validate the single-label path before
+enabling them on a new installation.
 
 ## Protocol references
 

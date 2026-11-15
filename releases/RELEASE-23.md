@@ -16,17 +16,28 @@ reconnect. Duplicate ACKed text is skipped for 30 seconds. Results distinguish C
 transmission ACK from physical display confirmation. Received label bytes cannot
 be interpreted as lighting or stereo events.
 
-This release does not implement playlist cycling or modify HA/Toolkit configuration.
+The bridge release itself does not implement playlist cycling or modify HA/Toolkit
+configuration. The subsequently installed [HA example](../docs/STEREO-PLAYLISTS.md)
+adds playlist selection and display-name updates separately.
 It excludes the still-pending Release 21 manual device-error-clearing changes.
 
 Deployment uses the normal `tools/release.sh check|apply COMMIT` backup/rollback
 workflow. Enabling the setting requires a bridge restart. Physical label updates
 must be restored separately; rolling back bridge files does not undo displayed text.
-Live testing has not been performed; confirm the original text and DLT variant
-before publishing a first short label.
+For another installation, confirm the original text and DLT variant before
+publishing a first short label.
 
 Offline verification: 345 tests pass for the isolated release; 370 pass with the
 pending error-clearing work also present. Real-process localhost tests pass for
 label delivery, command isolation, retained-message rejection, variants, rate
 limits, reconnect and missing ACKs, plus the existing stereo regression scenario.
-No physical DLT test or production deployment has been performed.
+These counts describe pre-deployment verification.
+
+## Live acceptance recorded — 15 November 2026
+
+The user deployed `ae85be20450e6a3fad243028fbd67f573f038afa` and confirmed that
+labels published through HA appeared on the physical original Saturn DLT.
+The later HA playlist selector was also accepted by the user. Its current package,
+separate volume-cap automation and remaining limitations are captured in
+[the stereo/playlist guide](../docs/STEREO-PLAYLISTS.md).
+No runtime bridge changes are introduced by this documentation/example update.

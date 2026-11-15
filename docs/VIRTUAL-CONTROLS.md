@@ -2,7 +2,7 @@
 
 Default profiles describe real C-Bus loads. Release 22 adds a separate opt-in for
 command-only groups that have no physical output to answer level requests.
-Nothing is inferred from absence or a timeout. For this site's eDLT stereo group:
+Nothing is inferred from absence or a timeout. For this site's original Saturn DLT stereo group:
 
 ```
 --virtual-control 254/56/250@110
@@ -78,6 +78,11 @@ level lookup is inappropriate here; no background physical query is attempted.
 
 ## Music Assistant example
 
+The current package also includes six-playlist selection and dynamic DLT labels.
+See [working configuration, dependencies and acceptance](STEREO-PLAYLISTS.md).
+The stereo coordinator uses dedicated virtual-control events; only the separate
+playlist-button handler currently uses filtered diagnostic activity.
+
 See `examples/homeassistant/cbus_stereo_controls_package.yaml` for the site-specific
 Big Room/Yamaha Zone 2 example. Adjust entity IDs before reuse elsewhere. It uses
 fresh events, not `light.stereo` state/brightness or diagnostic history, to avoid
@@ -87,9 +92,10 @@ out-of-order and old MQTT events; events older than ten seconds are ignored.
 A fresh ON first sends a non-retained numeric `50` to the group's ramp topic.
 The bridge's ACK-success feedback changes the virtual level from 100% to 50% and
 emits a **level** event, not another ON. The eDLT can receive that group-level
-command; its actual display/indicator behavior requires physical acceptance.
+command; the original stereo recovery was accepted on the physical installation.
+Repeat acceptance when adapting it to a different switch or configuration.
 Startup waits for a newer accepted control event, then powers the players and
-caps the initial MA volume at 0.5 before playing Favourites, enabling shuffle and repeat.
+caps the initial MA volume at 0.5 before playing the selected playlist, enabling shuffle and repeat.
 A more recent deliberate volume request during startup wins instead. OFF cancels
 startup, stops/powers off MA, then explicitly powers off the physical Yamaha zone.
 
@@ -102,12 +108,17 @@ the earlier draft's half-scale mapping (which made wall 50% equal player 25%).
 There is exactly one startup level write; its ACK/observed echo does not replay
 ON, restart the playlist or write another level back to C-Bus.
 An independent hard cap remains 0.65 on both MA and its physical output.
+It lives separately in `automations.yaml`; its captured example is
+[`cbus_stereo_volume_cap_automation.yaml`](../examples/homeassistant/cbus_stereo_volume_cap_automation.yaml).
+Keep exactly one cap automation enabled.
 
 The three old on/dimmer/off automations must be disabled when enabling this
 replacement. Their original definitions/IDs may be retained with
 `initial_state: false`. The old hard-cap automation is extended rather than
-removed. The included helper states/script are excluded from Recorder. The only reverse C-Bus write is the explicit one-time 50% startup command;
-continuous player-state-to-C-Bus synchronization is not added.
+removed. The coordinator helpers/scripts are excluded from Recorder. The only stereo-level
+write back to C-Bus is the explicit one-time 50% startup command; continuous
+player-state-to-C-Bus synchronization is not added. The separate playlist selector
+also sends dynamic text labels, which do not change stereo levels.
 
 After HA restart, control-active starts false: no music restarts automatically.
 If the bridge's logical control was already ON, use OFF then ON to explicitly

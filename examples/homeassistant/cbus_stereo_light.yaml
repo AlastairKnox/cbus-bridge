@@ -1,0 +1,20 @@
+# Merge this one light into the existing mqtt.light list; do not duplicate it.
+mqtt:
+  light:
+  - name: Stereo
+    availability_mode: all
+    availability:
+    - topic: cbus/bridge/availability
+    - topic: cbus/read/254/56/250/control_availability
+    payload_available: online
+    payload_not_available: offline
+    payload_on: 'ON'
+    payload_off: 'OFF'
+    unique_id: stereo
+    on_command_type: brightness
+    command_topic: cbus/write/254/56/250/switch
+    brightness_command_topic: cbus/write/254/56/250/ramp
+    brightness_state_topic: cbus/read/254/56/250/level
+    brightness_scale: 100
+    state_topic: cbus/read/254/56/250/level
+    state_value_template: '{{ ''OFF'' if (value | int(0)) == 0 else ''ON'' }}'

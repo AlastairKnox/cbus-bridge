@@ -1,4 +1,26 @@
-# Proposed C-Bus Observatory for Home Assistant
+# Home Assistant examples
+
+## Working Saturn DLT stereo and playlist controls
+
+The site-specific example captured on 15 November 2026 is
+[`cbus_stereo_controls_package.yaml`](cbus_stereo_controls_package.yaml).
+It contains safe stereo startup/shutdown, volume dimming, six-playlist selection,
+dynamic display labels, and long-press next-track control. The separate
+[`cbus_stereo_volume_cap_automation.yaml`](cbus_stereo_volume_cap_automation.yaml)
+is an `automations.yaml` list entry, not a package. Keep only one independent cap.
+[`cbus_stereo_light.yaml`](cbus_stereo_light.yaml) captures the separate MQTT light
+to merge into an existing configuration without duplicating it.
+
+Read [the setup, dependencies and acceptance guide](../../docs/STEREO-PLAYLISTS.md)
+before reuse. Adapt entity IDs, addresses and Music Assistant library IDs. Files
+are examples: bridge deployment does not install them into HA. No live HA edits
+or reloads are required merely to capture this already working configuration.
+
+## Historical C-Bus Observatory proposal
+
+The remaining notes describe the original diagnostic dashboard candidate, not a
+fresh export of the later, separately maintained live Observatory. Do not replace
+an evolved live dashboard with this older proposal.
 
 These files are review artifacts, NOT installed configuration. The user requires
 explicit approval before any live HA YAML changes. Bridge deployment does not copy

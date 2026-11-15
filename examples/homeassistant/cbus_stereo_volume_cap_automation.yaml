@@ -1,0 +1,21 @@
+# Separate automations.yaml entry, not a package. Do not duplicate an existing cap.
+- id: '1780442416042'
+  alias: Stereo - Enforce Max Volume
+  description: ''
+  triggers:
+  - trigger: numeric_state
+    entity_id:
+    - media_player.media_room_zone2
+    - media_player.big_room
+    attribute: volume_level
+    above: 0.65
+  conditions:
+  - condition: template
+    value_template: '{{ states(trigger.entity_id) not in [''off'',''unavailable'',''unknown''] }}'
+  actions:
+  - action: media_player.volume_set
+    target:
+      entity_id: '{{ trigger.entity_id }}'
+    data:
+      volume_level: 0.65
+  mode: single

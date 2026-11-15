@@ -27,3 +27,12 @@ opt-in environment setting and normal backed-up release apply. HA needs the
 additive package, disabling three old stereo handlers, extending the cap and
 changing only Stereo's availability. Reload MQTT/automations/scripts/helpers as
 supported by the installed HA version, or perform one checked HA restart.
+
+## Live acceptance and example update — recorded 15 November 2026
+
+The user deployed the stereo recovery and confirmed that it worked on the live
+installation. The current captured HA package starts the selected playlist rather
+than a fixed Favourites playlist, while preserving the 50% startup and 65% cap.
+The historical `script.stereo_start_favourites` entity ID is retained for existing
+OFF cancellation and volume guards; its displayed name describes selected-playlist
+startup. See [current configuration and acceptance](../docs/STEREO-PLAYLISTS.md).

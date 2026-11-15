@@ -1,4 +1,5 @@
-# Virtual group 254/56/250. Fresh events only; no replay of diagnostic attributes.
+# Site-specific working HA package captured 15 November 2026.
+# Adapt entities, source/group addresses and library URIs; see docs/STEREO-PLAYLISTS.md.
 input_boolean:
   stereo_control_active:
     name: Stereo wall control active
@@ -14,9 +15,13 @@ input_text:
   stereo_control_last_event:
     name: Stereo last processed control event
     max: 255
+  stereo_playlist_rx_cursor:
+    name: Stereo playlist input cursor
+    max: 255
+    initial: '{"seq":-1,"seen":0}'
 script:
   stereo_start_favourites:
-    alias: Stereo - Start Favourites safely
+    alias: Stereo - Start selected playlist safely
     mode: restart
     fields:
       start_event:
@@ -25,15 +30,14 @@ script:
     - condition: state
       entity_id: input_boolean.stereo_control_active
       state: 'on'
-    # Reset the eDLT's ON=100% level without replaying a second ON action.
     - action: mqtt.publish
       data:
         topic: cbus/write/254/56/250/ramp
         payload: '50'
         qos: 0
         retain: false
-    - wait_template: "{{ states('input_text.stereo_control_last_event') != start_event }}"
-      timeout: '00:00:05'
+    - wait_template: '{{ states(''input_text.stereo_control_last_event'') != start_event }}'
+      timeout: 00:00:05
       continue_on_timeout: false
     - condition: state
       entity_id: input_boolean.stereo_control_active
@@ -41,14 +45,15 @@ script:
     - action: media_player.turn_on
       target:
         entity_id: media_player.media_room_zone2
-    - wait_template: "{{ states('media_player.media_room_zone2') not in ['off','unavailable','unknown'] }}"
-      timeout: '00:00:10'
+    - wait_template: '{{ states(''media_player.media_room_zone2'') not in [''off'',''unavailable'',''unknown'']
+        }}'
+      timeout: 00:00:10
       continue_on_timeout: false
     - action: media_player.turn_on
       target:
         entity_id: media_player.big_room
-    - wait_template: "{{ states('media_player.big_room') not in ['off','unavailable','unknown'] }}"
-      timeout: '00:00:10'
+    - wait_template: '{{ states(''media_player.big_room'') not in [''off'',''unavailable'',''unknown''] }}'
+      timeout: 00:00:10
       continue_on_timeout: false
     - condition: state
       entity_id: input_boolean.stereo_control_active
@@ -57,16 +62,21 @@ script:
       target:
         entity_id: media_player.big_room
       data:
-        volume_level: '{{ [0.5, [0.12, states("input_number.stereo_requested_volume") | float(0.5)] | max] | min }}'
+        volume_level: '{{ [0.5, [0.12, states("input_number.stereo_requested_volume") | float(0.5)] | max] | min
+          }}'
+    - variables:
+        startup_playlist: '{{ states(''input_select.stereo_playlist'') }}'
     - action: music_assistant.play_media
       target:
         entity_id: media_player.big_room
       data:
-        media_id: Favourites
+        media_id: '{{ {''1970s'': ''library://playlist/53'', ''1980s'': ''library://playlist/16'', ''1990s'': ''library://playlist/18'',
+          ''2000s'': ''library://playlist/17'', ''2010s'': ''library://playlist/55'', ''Australian'': ''library://playlist/54''}.get(states(''input_select.stereo_playlist''),
+          ''library://playlist/53'') }}'
         media_type: playlist
         enqueue: replace
-    - wait_template: "{{ is_state('media_player.big_room', 'playing') }}"
-      timeout: '00:00:20'
+    - wait_template: '{{ is_state(''media_player.big_room'', ''playing'') }}'
+      timeout: 00:00:20
       continue_on_timeout: false
     - action: media_player.shuffle_set
       continue_on_error: true
@@ -85,13 +95,78 @@ script:
         entity_id: input_boolean.stereo_control_active
         state: 'on'
       - condition: template
-        value_template: "{{ states('input_text.stereo_control_last_event') != start_event }}"
+        value_template: '{{ states(''input_text.stereo_control_last_event'') != start_event }}'
       then:
       - action: media_player.volume_set
         target:
           entity_id: media_player.big_room
         data:
-          volume_level: '{{ [0.65, [0.12, states("input_number.stereo_requested_volume") | float(0.12)] | max] | min }}'
+          volume_level: '{{ [0.65, [0.12, states("input_number.stereo_requested_volume") | float(0.12)] | max] |
+            min }}'
+    - if:
+      - condition: template
+        value_template: '{{ states(''input_select.stereo_playlist'') != startup_playlist }}'
+      - condition: state
+        entity_id: input_boolean.stereo_control_active
+        state: 'on'
+      then:
+      - action: script.turn_on
+        target:
+          entity_id: script.stereo_playlist_apply
+        data:
+          variables:
+            play_selection: true
+  stereo_playlist_apply:
+    alias: Stereo - Apply selected playlist and DLT label
+    mode: restart
+    fields:
+      play_selection:
+        description: Only true for a fresh user selection; synchronizing a label never starts music.
+    sequence:
+    - delay:
+        milliseconds: 1200
+    - variables:
+        selected: '{{ states(''input_select.stereo_playlist'') }}'
+    - condition: template
+      value_template: '{{ selected in [''1970s'', ''1980s'', ''1990s'', ''2000s'', ''2010s'', ''Australian''] }}'
+    - action: mqtt.publish
+      data:
+        topic: cbus/write/254/56/91/label
+        payload: '{{ {''text'': selected, ''language'':1, ''variant'':1} | to_json }}'
+        qos: 0
+        retain: false
+    - condition: template
+      value_template: '{{ play_selection | default(false) | bool }}'
+    - condition: state
+      entity_id: input_boolean.stereo_control_active
+      state: 'on'
+    - condition: state
+      entity_id: script.stereo_start_favourites
+      state: 'off'
+    - condition: template
+      value_template: '{{ states(''media_player.big_room'') in [''playing'',''paused'',''idle''] and states(''media_player.media_room_zone2'')
+        not in [''off'',''unknown'',''unavailable''] }}'
+    - action: music_assistant.play_media
+      target:
+        entity_id: media_player.big_room
+      data:
+        media_id: '{{ {''1970s'': ''library://playlist/53'', ''1980s'': ''library://playlist/16'', ''1990s'': ''library://playlist/18'',
+          ''2000s'': ''library://playlist/17'', ''2010s'': ''library://playlist/55'', ''Australian'': ''library://playlist/54''}.get(states(''input_select.stereo_playlist''),
+          ''library://playlist/53'') }}'
+        media_type: playlist
+        enqueue: replace
+    - action: media_player.shuffle_set
+      continue_on_error: true
+      target:
+        entity_id: media_player.big_room
+      data:
+        shuffle: true
+    - action: media_player.repeat_set
+      continue_on_error: true
+      target:
+        entity_id: media_player.big_room
+      data:
+        repeat: all
 automation:
 - id: stereo_virtual_wall_control
   alias: Stereo - Fresh eDLT controls via Music Assistant
@@ -103,14 +178,8 @@ automation:
     qos: 0
   conditions:
   - condition: template
-    value_template: >-
-      {% set e = trigger.payload_json | default({}) %}
-      {% set age = as_timestamp(now()) - (e.ts | default(0) | float(0)) %}
-      {% set old = states('input_text.stereo_control_last_event').split(':') %}
-      {% set old_session = old[0] if old | length == 3 else '' %}
-      {% set old_sequence = old[1] | int(0) if old | length == 3 else 0 %}
-      {% set old_ts = old[2] | float(0) if old | length == 3 else 0 %}
-      {{ e.schema | default(0) == 1 and e.net | default(0) == 254
+    value_template: |-
+      {% set e = trigger.payload_json | default({}) %} {% set age = as_timestamp(now()) - (e.ts | default(0) | float(0)) %} {% set old = states('input_text.stereo_control_last_event').split(':') %} {% set old_session = old[0] if old | length == 3 else '' %} {% set old_sequence = old[1] | int(0) if old | length == 3 else 0 %} {% set old_ts = old[2] | float(0) if old | length == 3 else 0 %} {{ e.schema | default(0) == 1 and e.net | default(0) == 254
          and e.app | default(0) == 56 and e.group | default(0) == 250
          and e.semantics | default('') == 'virtual_command_model'
          and e.physical_confirmed | default(true) == false
@@ -125,9 +194,10 @@ automation:
   actions:
   - variables:
       event: '{{ trigger.payload_json }}'
-      target_volume: '{{ [0.65, [0.12, ((trigger.payload_json.level | float(0) / 255) | round(2))] | max] | min }}'
-      event_id: >-
-        {{ trigger.payload_json.session ~ ':' ~ trigger.payload_json.sequence ~ ':' ~ trigger.payload_json.ts }}
+      target_volume: '{{ [0.65, [0.12, ((trigger.payload_json.level | float(0) / 255) | round(2))] | max] | min
+        }}'
+      event_id: '{{ trigger.payload_json.session ~ '':'' ~ trigger.payload_json.sequence ~ '':'' ~ trigger.payload_json.ts
+        }}'
   - action: input_text.set_value
     target:
       entity_id: input_text.stereo_control_last_event
@@ -141,7 +211,9 @@ automation:
           entity_id: input_boolean.stereo_control_active
       - action: script.turn_off
         target:
-          entity_id: script.stereo_start_favourites
+          entity_id:
+          - script.stereo_start_favourites
+          - script.stereo_playlist_apply
       - action: media_player.media_stop
         continue_on_error: true
         target:
@@ -182,12 +254,116 @@ automation:
       entity_id: script.stereo_start_favourites
       state: 'off'
     - condition: template
-      value_template: "{{ states('media_player.big_room') not in ['off','unavailable','unknown'] }}"
+      value_template: '{{ states(''media_player.big_room'') not in [''off'',''unavailable'',''unknown''] }}'
     - action: media_player.volume_set
       target:
         entity_id: media_player.big_room
       data:
         volume_level: '{{ target_volume }}'
+- id: stereo_playlist_dlt_input
+  alias: Stereo - DLT playlist short and long presses
+  description: Short press selects next playlist; long press skips track only while Big Room is playing. Fresh unit
+    110/group 91 RX only; rolling history consumed once with restart/gap baselines.
+  mode: queued
+  max: 10
+  max_exceeded: silent
+  triggers:
+  - trigger: mqtt
+    topic: cbus/bridge/traffic
+    qos: 0
+  conditions:
+  - condition: template
+    value_template: '{{ trigger.payload_json is defined and trigger.payload_json is mapping and trigger.payload_json.schema
+      | default(0) == 1 and trigger.payload_json.sequence | default(none) is number and trigger.payload_json.ts
+      | default(none) is number and trigger.payload_json.activity_events | default(none) is iterable }}'
+  actions:
+  - variables:
+      packet: '{{ trigger.payload_json }}'
+      cursor: '{{ states(''input_text.stereo_playlist_rx_cursor'') | from_json({''seq'':-1,''seen'':0}) }}'
+      received: '{{ as_timestamp(now()) }}'
+  - condition: template
+    value_template: '{{ -1 <= received - (packet.ts | float(0)) <= 3 }}'
+  - variables:
+      continuous: '{{ cursor.seq | default(-1) | int(-1) >= 0 and 0 <= received - (cursor.seen | default(0) | float(0))
+        <= 4 and packet.sequence | int >= cursor.seq | int }}'
+  - variables:
+      presses: |-
+        {% set ns = namespace(events=[]) %}
+        {% if continuous %}
+          {% for e in packet.activity_events | default([]) %}
+            {% set age = received - (e.ts | default(0) | float(0)) %}
+            {% if e.kind | default('') == 'lighting' and e.direction | default('') == 'RX'
+                  and e.app | default(-1) == 56 and e.group | default(-1) == 91
+                  and e.unit | default(-1) == 110 and e.command | default(-1) == 2
+                  and e.level | default(-1) in [127,229]
+                  and e.seq | default(0) | int(0) > cursor.seq | default(-1) | int(-1)
+                  and e.seq | int <= packet.sequence | int and -1 <= age <= 5 %}
+              {% set ns.events = ns.events + [e] %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {{ ns.events | sort(attribute='seq') | unique(attribute='seq') | list }}
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.stereo_playlist_rx_cursor
+    data:
+      value: '{{ {''seq'':packet.sequence | int,''seen'':received} | to_json }}'
+  - repeat:
+      for_each: '{{ presses }}'
+      sequence:
+      - choose:
+        - conditions: '{{ repeat.item.level == 127 }}'
+          sequence:
+          - action: input_select.select_next
+            target:
+              entity_id: input_select.stereo_playlist
+            data:
+              cycle: true
+        - conditions:
+          - condition: template
+            value_template: '{{ repeat.item.level == 229 }}'
+          - condition: state
+            entity_id: media_player.big_room
+            state: playing
+          sequence:
+          - action: media_player.media_next_track
+            target:
+              entity_id: media_player.big_room
+- id: stereo_playlist_selection
+  alias: Stereo - Playlist selection updates DLT and playback
+  mode: restart
+  triggers:
+  - trigger: state
+    entity_id: input_select.stereo_playlist
+  conditions:
+  - condition: template
+    value_template: '{{ trigger.from_state is not none and trigger.to_state is not none and trigger.from_state.state
+      in [''1970s'', ''1980s'', ''1990s'', ''2000s'', ''2010s'', ''Australian''] and trigger.to_state.state in [''1970s'',
+      ''1980s'', ''1990s'', ''2000s'', ''2010s'', ''Australian''] and trigger.from_state.state != trigger.to_state.state
+      }}'
+  actions:
+  - action: script.turn_on
+    target:
+      entity_id: script.stereo_playlist_apply
+    data:
+      variables:
+        play_selection: true
+- id: stereo_playlist_label_sync
+  alias: Stereo - Restore playlist label without playback
+  mode: restart
+  triggers:
+  - trigger: homeassistant
+    event: start
+  - trigger: mqtt
+    topic: homeassistant/status
+    payload: online
+  actions:
+  - action: script.turn_on
+    target:
+      entity_id: script.stereo_playlist_apply
+    data:
+      variables:
+        play_selection: false
 recorder:
   exclude:
     entities:
@@ -195,3 +371,16 @@ recorder:
     - input_number.stereo_requested_volume
     - input_text.stereo_control_last_event
     - script.stereo_start_favourites
+    - input_text.stereo_playlist_rx_cursor
+    - script.stereo_playlist_apply
+input_select:
+  stereo_playlist:
+    name: Stereo playlist
+    icon: mdi:playlist-music
+    options:
+    - 1970s
+    - 1980s
+    - 1990s
+    - 2000s
+    - 2010s
+    - Australian
