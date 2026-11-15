@@ -48,6 +48,14 @@ Reads are spread across a nominal 15-minute cycle and yield to lighting activity
 
 Voltage and diagnostic support depend on the unit and firmware. Latched flags describe recorded events; they are not an error rate or proof of a current hardware fault. [Device monitoring setup →](docs/DEVICE-MONITORING.md)
 
+### Dynamic DLT labels from MQTT
+
+Send short text such as “Night time” or a selected playlist name to an original
+Saturn DLT. Explicitly enabled groups accept validated MQTT requests through the
+existing command queue, with lighting controls taking priority. CNI acknowledgements
+are reported separately from physical display confirmation. Label writes are disabled
+by default. [DLT label setup →](docs/DLT-LABELS.md)
+
 ### A window onto the wire
 
 The optional **C-Bus Observatory** Home Assistant dashboard makes bus activity visible:

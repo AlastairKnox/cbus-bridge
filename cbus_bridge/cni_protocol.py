@@ -52,35 +52,134 @@ def _checked_frame(hexline: str) -> Optional[bytes]:
     return frame if sum(frame) % 256 == 0 else None
 
 
-def parse_monitored_sals(hexline: str) -> List[MonitoredSAL]:
-    """Decode all supported commands atomically from a local SMART-mode packet.
+@dataclass(frozen=True)
+class DltLabelRequest:
+    group: int
+    text: str
+    language: int = 1
+    variant: int = 1  # Toolkit numbering; wire flavours are 0..3.
 
-    Unknown/truncated commands reject the whole packet; bytes must never be guessed
-    to be levels. TERMINATE RAMP has no level and is consumed without inventing one.
-    Routed traffic is deliberately unsupported until routing is implemented.
+    @property
+    def topic(self):
+        return f"cbus/write/254/56/{self.group}/label"
+
+
+@dataclass(frozen=True)
+class MonitoredLabel:
+    dev: int
+    app: int
+    group: int
+    text: str
+    language: int
+    variant: int
+
+
+def parse_dlt_label_targets(specs):
+    """Explicit local Lighting targets, independent of physical HA profiles."""
+    targets = set()
+    if len(specs) > 16:
+        raise ValueError("At most 16 --dlt-label-target entries are supported")
+    for spec in specs:
+        match = re.fullmatch(r"254/56/(0|[1-9][0-9]{0,2})", spec)
+        if not match or int(match[1]) > 254 or int(match[1]) in targets:
+            raise ValueError("DLT targets must be unique 254/56/GROUP addresses (0..254)")
+        targets.add(int(match[1]))
+    return frozenset(targets)
+
+
+def validate_dlt_label(request):
+    if not isinstance(request, DltLabelRequest):
+        raise ValueError("Expected a DLT label request")
+    if type(request.group) is not int or not 0 <= request.group <= 254:
+        raise ValueError("Invalid label group")
+    if type(request.language) is not int or request.language not in (1, 2):
+        raise ValueError("Text labels currently support English (1) or English Australia (2)")
+    if type(request.variant) is not int or not 1 <= request.variant <= 4:
+        raise ValueError("Label variant must be Toolkit variant 1..4")
+    if not isinstance(request.text, str) or not 1 <= len(request.text) <= 16:
+        raise ValueError("Label text must contain 1..16 printable ASCII characters")
+    if not request.text.strip() or any(not 32 <= ord(c) <= 126 for c in request.text):
+        raise ValueError("Label text must contain 1..16 printable ASCII characters")
+    return request
+
+
+def parse_dlt_label_request(group, payload):
+    import json
+    def unique_pairs(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError("Duplicate label field")
+            obj[key] = value
+        return obj
+    try:
+        obj = json.loads(payload, object_pairs_hook=unique_pairs)
+    except (ValueError, UnicodeError, TypeError) as exc:
+        raise ValueError("Label payload must be a JSON object") from exc
+    if not isinstance(obj, dict) or 'text' not in obj or set(obj) - {'text', 'language', 'variant'}:
+        raise ValueError("Label fields are text, language and variant only")
+    return validate_dlt_label(DltLabelRequest(group, obj['text'], obj.get('language', 1), obj.get('variant', 1)))
+
+
+def build_dlt_label_frame(request):
+    """CBUS-APP/02 issue1.5 section2.6.5; Class4 local SAL, no ACK tag.
+
+    Text LABEL: 101LLLLL, group, options, language, up to16 ASCII bytes.
+    Text options use only bits5..6 for zero-based flavour. Empty text deletes
+    labels in the protocol and is deliberately not exposed by this writer.
     """
+    validate_dlt_label(request)
+    text = request.text.encode('ascii')
+    raw = bytes((5, 56, 0, 0xA0 | (3 + len(text)), request.group,
+                 (request.variant - 1) << 5, request.language)) + text
+    return (raw + bytes((-sum(raw) & 255,))).hex().upper()
+
+
+def _monitored_commands(hexline):
     b = _checked_frame(hexline)
-    if b is None or len(b) < 7 or b[0] != 0x05:
-        return []
-    if b[3] == 0x00:
+    if b is None or len(b) < 7 or b[0] != 5:
+        return None
+    if b[3] == 0:
         start = 4
     elif b[3:5] == b"\x01\x00":
         start = 5
     else:
-        return []
-    end = len(b) - 1  # The checksum is not SAL payload.
-    commands = []
+        return None
+    end, commands = len(b) - 1, []
     while start < end:
         cmd = b[start]
-        width = 3 if cmd in RAMP_COMMANDS else 2 if cmd in (0x01, 0x79, 0x09) else None
+        width = (1 + (cmd & 31) if cmd & 0xE0 == 0xA0 else
+                 3 if cmd in RAMP_COMMANDS else 2 if cmd in (1, 0x79, 9) else None)
         if width is None or start + width > end:
-            return []
-        commands.append(MonitoredSAL(
-            dev=b[1], app=b[2], cmd=cmd, group=b[start + 1],
-            level=b[start + 2] if width == 3 else None, raw_hex=hexline,
-        ))
+            return None
+        args = b[start + 1:start + width]
+        if cmd & 0xE0 == 0xA0:
+            # Decode plain text only; icons/preferred-language are unsupported,
+            # and can never be interpreted as lighting commands or levels.
+            if not 3 <= len(args) <= 19 or args[0] == 255 or args[1] & ~0x60:
+                return None
+            if any(not 32 <= c <= 126 for c in args[3:]):
+                return None
+            commands.append(MonitoredLabel(b[1], b[2], args[0], args[3:].decode('ascii'),
+                                           args[2], 1 + ((args[1] >> 5) & 3)))
+        else:
+            commands.append(MonitoredSAL(b[1], b[2], cmd, args[0],
+                                        args[1] if len(args) == 2 else None, hexline))
         start += width
-    return commands
+    return commands or None
+
+
+def parse_monitored_sals(hexline: str) -> List[MonitoredSAL]:
+    """Atomically validate the packet, then return only lighting actions.
+
+    Valid text LABELs are skipped by their declared length, never interpreted as
+    actions. Unsupported/truncated commands reject the packet as before.
+    """
+    return [c for c in (_monitored_commands(hexline) or []) if isinstance(c, MonitoredSAL)]
+
+
+def parse_monitored_labels(hexline):
+    return [c for c in (_monitored_commands(hexline) or []) if isinstance(c, MonitoredLabel)]
 
 
 def parse_monitored_sal(hexline: str) -> Optional[MonitoredSAL]:
@@ -322,15 +421,21 @@ def diagnose_frame(hexline: str) -> str:
         return "unsupported"
     # Distinguish unsupported command opcodes from a truncated known command.
     pos, end = (4 if b[3] == 0 else 5), len(b) - 1
+    saw_label = False
     while pos < end:
         cmd = b[pos]
-        width = 3 if cmd in RAMP_COMMANDS else 2 if cmd in (1, 0x79, 9) else None
+        saw_label = saw_label or cmd & 0xE0 == 0xA0
+        width = (1 + (cmd & 31) if cmd & 0xE0 == 0xA0 else
+                 3 if cmd in RAMP_COMMANDS else 2 if cmd in (1, 0x79, 9) else None)
         if width is None:
             return "unsupported"
         if pos + width > end:
             return "malformed"
         pos += width
-    return "lighting" if parse_monitored_sals(hexline) else "malformed"
+    commands = _monitored_commands(hexline)
+    if commands:
+        return "lighting" if any(isinstance(c, MonitoredSAL) for c in commands) else "label"
+    return "unsupported" if saw_label else "malformed"
 
 
 def parse_interface_reply(text, expected_setup=None):

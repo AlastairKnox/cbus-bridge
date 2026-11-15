@@ -18,6 +18,12 @@ if [[ -n "${CBUS_VIRTUAL_CONTROL:-}" ]]; then
   virtual_control_args=(--virtual-control "$CBUS_VIRTUAL_CONTROL")
 fi
 
+# Optional single label group; unset means no label writes are accepted.
+dlt_label_args=()
+if [[ -n "${CBUS_DLT_LABEL_TARGET:-}" ]]; then
+  dlt_label_args=(--dlt-label-target "$CBUS_DLT_LABEL_TARGET")
+fi
+
 exec python /opt/cbus_bridge/run_bridge.py \
   --device-monitor-config "${CBUS_DEVICE_MONITOR_CONFIG:-/opt/cbus_bridge/device_monitor.json}" \
   --cni-host "${CNI_HOST}" \
@@ -30,6 +36,7 @@ exec python /opt/cbus_bridge/run_bridge.py \
   --log-level "${LOG_LEVEL}" \
   "${monitor_args[@]}" \
   "${virtual_control_args[@]}" \
+  "${dlt_label_args[@]}" \
   ${INIT} ${STATUS} ${STATUS_96} \
   --resync-every "${RESYNC_EVERY}" \
   --resync-mode "${RESYNC_MODE}" \

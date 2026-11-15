@@ -11,6 +11,7 @@ import paho.mqtt.client as mqtt
 
 from .cni_connection import CniConnection
 from .cni_protocol import parse_monitored_sals, parse_status_reply, diagnose_frame, RAMP_CODES, parse_binary_status_reply, parse_interface_reply, parse_identity_reply, parse_device_health_reply, parse_device_voltage_reply, parse_device_health_evidence
+from .cni_protocol import (parse_monitored_labels, build_dlt_label_frame, parse_dlt_label_request)
 from .ha_profiles import GroupProfile
 from .utils import (
     BridgeDiagnostics,
@@ -67,6 +68,7 @@ class CbusMqttBridge:
         ack_timeout_s: float = 2.5,
         diagnostics=None,
         ramp_readback_every=0,
+        dlt_label_targets=(),
     ):
         self.diagnostics = diagnostics if diagnostics is not None else BridgeDiagnostics(profiles)
         self.inventory = DeviceInventory(self.diagnostics)
@@ -120,6 +122,7 @@ class CbusMqttBridge:
             {(p.app,p.group) for p in profiles.values() if p.level_mode == 'pct' and p.virtual_control_source is None},
             interval=0 if readonly else ramp_readback_every)
         self.virtual_controls = VirtualControls(self)
+        self.dlt_labels = DltLabels(self, dlt_label_targets)
 
     def execute_queued(self, operation, lease):
         self._command_local.lease = lease
@@ -133,6 +136,7 @@ class CbusMqttBridge:
         return lease.atomic(operation, expire=expire) if lease is not None else operation()
 
     def cancel_session(self):
+        self.dlt_labels.reset()
         self.virtual_controls.reset()
         self.inventory.cancel()
         self._health_waiting = None
@@ -1117,6 +1121,13 @@ class CbusMqttBridge:
                     self.handle_cbus_level_update(app=sr.app, group=g, level255=lvl, source="STATUS")
                 continue
 
+            labels = parse_monitored_labels(norm)
+            for label in labels:
+                self._valid_rx()
+                self.dlt_labels.observe(label)
+            if labels and category == 'label':
+                continue
+
             sals = parse_monitored_sals(norm)
             for sal in (item for item in sals if item.app == 0x38):
                 self.inventory.observe_unit(sal.dev)
@@ -1345,3 +1356,141 @@ class VirtualControls:
                 if s['ramp']:
                     self._sample(s,now)
                     self._emit(self.profiles[key],s,'off' if s['level']==0 else 'level')
+
+
+class DltLabels:
+    """Explicit local text labels, serialized on the existing session worker.
+
+    No timers, sockets, persistence or startup replay. Cached ACKs are short-lived
+    transmission evidence only; never proof that a particular DLT displayed text.
+    """
+    MIN_INTERVAL = 1.0
+    DEDUP_SECONDS = 30.0
+
+    def __init__(self, bridge, targets=(), clock=None):
+        self.bridge = bridge
+        self.targets = frozenset(targets)
+        if len(self.targets) > 16 or any(type(g) is not int or not 0 <= g <= 254 for g in self.targets):
+            raise ValueError('Invalid DLT label target allowlist')
+        self.topics = {f'cbus/write/254/56/{g}/label': g for g in self.targets}
+        self.clock = clock or time.monotonic
+        self.lock = threading.RLock()
+        self.epoch = 0
+        self.cache = {}  # at most16 targets *2 languages *4 variants
+        self.last_sent = float('-inf')
+
+    def reset(self):
+        with self.lock:
+            self.epoch += 1
+            self.cache.clear()
+            # Preserve rate limit across reconnects, but not duplicate evidence.
+
+    def snapshot(self):
+        return {'enabled': bool(self.targets), 'targets': sorted(self.targets),
+                'min_send_interval_s': self.MIN_INTERVAL,
+                'text_limit_ascii_bytes': 16, 'variant_numbering': 'Toolkit_1_to_4',
+                'delivery_semantics': 'cni_ack_not_display_confirmation'}
+
+    def _result(self, request, outcome):
+        import json
+        self.bridge.diagnostics.bump('dlt_label_' + outcome + '_total')
+        result = {'schema': 1, 'ts': int(time.time()), 'net': 254, 'app': 56,
+                  'group': request.group, 'language': request.language,
+                  'variant': request.variant, 'text': request.text,
+                  'result': outcome, 'display_confirmed': False}
+        self.bridge.mqtt.publish(f'cbus/read/254/56/{request.group}/label_result',
+                                payload=json.dumps(result, separators=(',', ':')),
+                                qos=0, retain=False)
+
+    def admit(self, topic, payload, enqueue):
+        if topic not in self.topics:
+            self.bridge.diagnostics.bump('dlt_label_unconfigured_total')
+            return False
+        if self.bridge.readonly or len(payload) > 256:
+            self.bridge.diagnostics.bump('dlt_label_rejected_total')
+            return False
+        try:
+            request = parse_dlt_label_request(self.topics[topic], payload)
+        except ValueError:
+            self.bridge.diagnostics.bump('dlt_label_invalid_total')
+            return False
+        accepted = enqueue(lambda: self.send(request), interactive=False,
+                           key=('dlt-label', request.group, request.language, request.variant))
+        if not accepted:
+            self._result(request, 'queue_rejected')
+        return accepted
+
+    def observe(self, label):
+        self.bridge.diagnostics.event('dlt_label', 'RX', app=label.app, group=label.group,
+                                      unit=label.dev, language=label.language, variant=label.variant,
+                                      text=label.text)
+        if label.app != 56 or label.group not in self.targets:
+            return
+        key = (label.group, label.language, label.variant)
+        with self.lock:
+            cached = self.cache.get(key)
+            if cached and cached[0] != label.text:
+                self.cache.pop(key, None)
+
+    def send(self, request):
+        b = self.bridge
+        # Build and validate before acquiring the write lock. Never send raw MQTT.
+        frame = build_dlt_label_frame(request)
+        if request.group not in self.targets or b.readonly:
+            b.diagnostics.bump('dlt_label_rejected_total')
+            return False
+        key = (request.group, request.language, request.variant)
+        with self.lock:
+            epoch, now = self.epoch, self.clock()
+            cached = self.cache.get(key)
+            if cached and cached[0] == request.text and now - cached[1] < self.DEDUP_SECONDS:
+                b._guarded(lambda: self._result(request, 'duplicate_skipped'))
+                return False
+            if now - self.last_sent < self.MIN_INTERVAL:
+                b._guarded(lambda: self._result(request, 'rate_limited'))
+                return False
+        tag = b._next_tag()
+        with b._write_lock:
+            waiter = b._register_waiter(tag)
+            try:
+                def transmit():
+                    with self.lock:
+                        if epoch != self.epoch:
+                            raise CommandRejected('session_changed')
+                        self.last_sent = self.clock()
+                    b.cni.send_hex_frame(frame + tag)
+                b._guarded(transmit)
+                b.diagnostics.tx('dlt_label', app=56, group=request.group, tag=tag,
+                                 language=request.language, variant=request.variant, hex=frame)
+                b.diagnostics.bump('dlt_label_attempts_total')
+                got, result = b._await_ack(tag, waiter)
+            except CommandRejected:
+                raise
+            except Exception:
+                b.diagnostics.bump('dlt_label_send_failure_total')
+                raise
+            finally:
+                with b._ack_lock:
+                    b._ack_waiters.pop(tag, None)
+        if result == 'cancelled':
+            raise CommandRejected('session_changed')
+        if not got:
+            b.diagnostics.command_failure('label_ack_timeout', app=56, group=request.group)
+            b._guarded(lambda: self._result(request, 'ack_timeout'), expire=False)
+            lease = getattr(b._command_local, 'lease', None)
+            if lease is not None:
+                lease.invalidate()  # ambiguous ACK: never reuse tags on this socket
+            return False
+        outcome = {'.': 'ack_success', '#': 'retries_exhausted', '$': 'corruption',
+                   '%': 'clock_loss', '!': 'bang'}.get(result, 'ack_failure')
+        def complete():
+            with self.lock:
+                if epoch != self.epoch:
+                    raise CommandRejected('session_changed')
+                if result == '.':
+                    self.cache[key] = (request.text, self.clock())
+            self._result(request, outcome)
+        b._guarded(complete, expire=False)
+        if result != '.':
+            b.diagnostics.command_failure('label_' + outcome, app=56, group=request.group)
+        return result == '.'

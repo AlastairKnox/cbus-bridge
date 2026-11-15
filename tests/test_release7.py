@@ -192,6 +192,7 @@ class MonitorConfigurationTests(unittest.TestCase):
         client,cni,bridge = Mock(),Mock(),Mock()
         bridge.ramps.snapshot.return_value = {}
         bridge.inventory.snapshot.return_value = {"version": 0}
+        bridge.dlt_labels.snapshot.return_value = {}
         cni.failover_status.return_value = {}
         client.loop_start.side_effect = lambda:client.on_connect(client,None,{},0)
         class End(BaseException): pass

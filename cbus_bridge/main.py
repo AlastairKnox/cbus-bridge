@@ -14,6 +14,7 @@ import paho.mqtt.client as mqtt
 from .ha_profiles import load_ha_mqtt_profiles, configure_virtual_controls
 from .cni_connection import CniConnection
 from .bridge import CbusMqttBridge
+from .cni_protocol import parse_dlt_label_targets
 from .utils import BridgeDiagnostics, CommandWorker, command_requires_duration_wait
 from .utils import instance_lock, LatestPublisher, FunctionalHealth, DeviceMonitor
 
@@ -81,6 +82,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     ap.add_argument("--virtual-control", action="append", default=[], metavar="254/56/GROUP@UNIT",
                     help="Explicit virtual command-only dimmer and allowed wall-switch source; repeatable.")
+
+    ap.add_argument("--dlt-label-target", action="append", default=[], metavar="254/56/GROUP",
+                    help="Opt in a local Lighting group for MQTT text labels; repeatable, maximum16.")
 
     ap.add_argument("--init", action="store_true", help="Send CNI init sequence.")
     ap.add_argument("--monitor", action=argparse.BooleanOptionalAction, default=False,
@@ -151,6 +155,7 @@ def run(argv=None) -> int:
     profiles = load_ha_mqtt_profiles(args.ha_config)
     try:
         configure_virtual_controls(profiles,args.virtual_control)
+        label_targets = parse_dlt_label_targets(args.dlt_label_target)
     except ValueError as exc:
         parser.error(str(exc))
     LOG.info("Loaded %d C-Bus group profiles from HA config", len(profiles))
@@ -199,7 +204,8 @@ def run(argv=None) -> int:
     diagnostics = BridgeDiagnostics(profiles)
     publisher = LatestPublisher(mc, diagnostics)
     bridge = CbusMqttBridge(cni=cni, mqtt_client=publisher, profiles=profiles, readonly=readonly,
-                            diagnostics=diagnostics, ramp_readback_every=args.ramp_readback_every)
+                            diagnostics=diagnostics, ramp_readback_every=args.ramp_readback_every,
+                            dlt_label_targets=label_targets)
 
     try:
         device_monitor = (DeviceMonitor.from_file(bridge.inventory,args.device_monitor_config)
@@ -253,6 +259,7 @@ def run(argv=None) -> int:
             "diagnostics": diagnostics.snapshot(),
             "command_queue": worker.snapshot(),
             "ramp_tracking": bridge.ramps.snapshot(),
+            "dlt_labels": bridge.dlt_labels.snapshot(),
             "mqtt_publications": publisher.snapshot(),
             "functional_health": health.snapshot(),
 
@@ -296,6 +303,7 @@ def run(argv=None) -> int:
             metrics.last_mqtt_connect_mono = time.monotonic()
 
             bridge.virtual_controls.reset()
+            bridge.dlt_labels.reset()
             LOG.info("MQTT connected")
             client.subscribe("cbus/write/+/+/+/+")
             LOG.info("Subscribed to cbus/write/+/+/+/+")
@@ -382,6 +390,9 @@ def run(argv=None) -> int:
                 else:
                     last_resync_admission[0] = now
                     enqueue(lambda: perform_resync(mode), key='resync')
+            return
+        if msg.topic.startswith('cbus/write/') and msg.topic.endswith('/label'):
+            bridge.dlt_labels.admit(msg.topic, bytes(msg.payload), enqueue)
             return
         if msg.topic in command_topics:
             topic, payload = msg.topic, bytes(msg.payload)

@@ -268,6 +268,7 @@ class RampBridgeTests(unittest.TestCase):
         client,cni,bridge=Mock(),Mock(),Mock()
         cni.failover_status.return_value={};bridge.ramps.snapshot.return_value={}
         bridge.inventory.snapshot.return_value={"version":0}
+        bridge.dlt_labels.snapshot.return_value = {}
         targets={}
         mqtt_up,cni_up=threading.Event(),threading.Event()
         stop=Mock();stop.wait.side_effect=[False,True]
