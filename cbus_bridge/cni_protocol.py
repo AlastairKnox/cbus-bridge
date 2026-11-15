@@ -299,6 +299,17 @@ def parse_identity_reply(hexline):
     return IdentityReply(b[1], b[2], b[5], text.decode('ascii').strip())
 
 
+def build_device_error_clear_request(unit: int) -> str:
+    """Local unicast CAL RESET ($08): clear latched errors, SIUG 1.17 §7.1.
+
+    This is not the serial-interface '~' reset. No broadcast or routed form.
+    """
+    if type(unit) is not int or not 0 <= unit <= 254:
+        raise ValueError('Expected one local unit address 0..254')
+    raw = bytes((0x06, unit, 0x00, 0x08))
+    return (raw + bytes((-sum(raw) & 255,))).hex().upper()
+
+
 DEVICE_ERROR_FLAGS = ('power_on_reset', 'internal_stack_overflow', 'communications_tx_error',
                       'micro_reset', 'eeprom_data_error', 'eeprom_checksum_error',
                       'eeprom_write_error', 'installation_mmi_error')

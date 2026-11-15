@@ -80,6 +80,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--device-monitor-config", default=None,
                     help="Optional reviewed device roster; missing/invalid config disables device polling.")
 
+    ap.add_argument("--device-error-state", default=None,
+                    help="Opt-in writable audit file for manual per-unit error clearing.")
     ap.add_argument("--virtual-control", action="append", default=[], metavar="254/56/GROUP@UNIT",
                     help="Explicit virtual command-only dimmer and allowed wall-switch source; repeatable.")
 
@@ -213,6 +215,9 @@ def run(argv=None) -> int:
     except (OSError,ValueError,TypeError,RecursionError) as exc:
         LOG.error('Device monitoring disabled: %s', type(exc).__name__)
         device_monitor = DeviceMonitor(bridge.inventory)
+
+    if args.device_error_state:
+        device_monitor.enable_error_clearing(args.device_error_state)
 
     worker = CommandWorker(diagnostics, cancel=bridge.cancel_session)
     health = FunctionalHealth(timeout=60)
@@ -376,6 +381,10 @@ def run(argv=None) -> int:
                 request = None
             if isinstance(request, dict) and set(request) == {'inventory'}:
                 bridge.request_inventory(request['inventory'],worker)
+                return
+            if isinstance(request,dict) and set(request) == {'clear_device_errors'}:
+                if not device_monitor.clear_errors(request['clear_device_errors'],worker.snapshot()['ready'],readonly):
+                    diagnostics.command_failure('device_error_clear_rejected')
                 return
             if isinstance(request,dict) and set(request) == {'device_monitor'}:
                 if request['device_monitor'] == 'refresh': device_monitor.refresh()

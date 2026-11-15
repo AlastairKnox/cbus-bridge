@@ -16,3 +16,6 @@ __pycache__/
 
 # Reviewed site-specific monitoring roster
 device_monitor.json
+
+# Runtime error-clear audit (backed up with the deployed application)
+/device_state/

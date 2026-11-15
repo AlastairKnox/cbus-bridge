@@ -46,6 +46,8 @@ A generated Home Assistant package provides one device entry per unit, voltage s
 
 Reads are spread across a nominal 15-minute cycle and yield to lighting activity; monitoring pauses during ramp tracking. Units without usable health replies stay in the inventory without being repeatedly polled or shown as zero volts. Missing replies and stale readings are represented explicitly.
 
+Optional manual error clearing saves the old flags, clears one selected unit, and verifies the result before updating its baseline. It uses the same paced queue and requires explicit confirmation; routine monitoring never clears flags. [Manual clearing setup →](docs/DEVICE-ERROR-CLEARING.md)
+
 Voltage and diagnostic support depend on the unit and firmware. Latched flags describe recorded events; they are not an error rate or proof of a current hardware fault. [Device monitoring setup →](docs/DEVICE-MONITORING.md)
 
 ### Dynamic DLT labels from MQTT

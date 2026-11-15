@@ -138,8 +138,8 @@ Toolkit if the old text is needed. Preserve a backup before changing either syst
   started. The user then confirmed the physical playlist controls worked well.
 - Long press was subsequently changed from previous-playlist to next-track. HA
   configuration validation, automation reload and the player's supported next-track
-  feature were checked. **Explicit user confirmation of that latest physical
-  long-press skip is not recorded yet.**
+  feature were checked. The user subsequently confirmed that the physical
+  long-press next-track action worked well on the deployed configuration.
 
 This snapshot makes the working configuration reviewable; it is not evidence that
 every failure mode has been exercised on hardware. No live state or credentials

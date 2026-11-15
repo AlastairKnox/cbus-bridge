@@ -12,6 +12,12 @@ case "${CNI_MONITOR:-1}" in
   *) echo 'CNI_MONITOR must be 0 or 1' >&2; exit 1 ;;
 esac
 
+# Clearing stays disabled until an operator provisions a writable audit directory.
+error_clear_args=()
+if [[ -n "${CBUS_DEVICE_ERROR_STATE:-}" ]]; then
+  error_clear_args=(--device-error-state "$CBUS_DEVICE_ERROR_STATE")
+fi
+
 # Explicit one-group opt-in; leave unset for physical-load behavior everywhere.
 virtual_control_args=()
 if [[ -n "${CBUS_VIRTUAL_CONTROL:-}" ]]; then
@@ -35,6 +41,7 @@ exec python /opt/cbus_bridge/run_bridge.py \
   --ha-config "${HA_CONFIG}" \
   --log-level "${LOG_LEVEL}" \
   "${monitor_args[@]}" \
+  "${error_clear_args[@]}" \
   "${virtual_control_args[@]}" \
   "${dlt_label_args[@]}" \
   ${INIT} ${STATUS} ${STATUS_96} \

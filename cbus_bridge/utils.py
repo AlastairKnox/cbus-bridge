@@ -1025,6 +1025,7 @@ class DeviceInventory:
         self.serial = self.version = 0
         self.presence = {'state':'not_requested'}
         self.presence_slots = {}
+        self.error_store = None
 
     def _change(self):
         self.version += 1
@@ -1104,6 +1105,52 @@ class DeviceInventory:
             self.diagnostics.bump('inventory_surveys_started_total'); self._change()
             return True
 
+    def request_error_clear(self, unit, request_id, ready, readonly=False):
+        """One explicit transaction, sharing the inventory worker and pacing gates."""
+        with self.lock:
+            store = self.error_store
+            if not store or not store.enabled:
+                self.last_request_error = 'error_clear_disabled'; return False
+            # request() performs the ordinary readiness, busy and cooldown checks.
+            if not self.request({'health':[unit]}, ready, readonly): return False
+            try:
+                store.begin(unit, request_id)
+            except (OSError, ValueError):
+                self.cancel('clear_admission_failed')
+                self.last_request_error = 'clear_state_or_request_id_invalid'; return False
+            self.job.update(mode='clear_errors', phase='preflight', request_id=request_id,
+                            deadline=self.clock()+60)
+            self._change()
+            return True
+
+    def _clear_result(self, token, value):
+        """A fresh read is required on each side; no retries of the write."""
+        unit = token['unit']
+        health = self.rows[unit]['health']
+        phase = self.job['phase']
+        health['reads']['summary'].update(outcome='reply' if value is not None else 'no_reply',
+                                          completed_ts=int(self.wall()))
+        if value is not None:
+            health.update(value, observed_ts=int(self.wall()), diagnostics_available=True)
+        try:
+            if value is None:
+                outcome = 'preflight_no_reply' if phase == 'preflight' else 'unverified_no_reply'
+                self.error_store.finish(unit, outcome)
+            elif phase == 'preflight':
+                self.error_store.prepare(unit, value['latched_errors_raw'])
+                self.tasks.appendleft((unit,8))
+                self.job['phase'] = 'clearing'
+                self._change(); return
+            else:
+                self.error_store.finish(unit, 'verified_clear' if value['latched_errors_raw'] == 0
+                                        else 'flags_remaining', value['latched_errors_raw'])
+        except OSError:
+            self.cancel('clear_persistence_failed'); return
+        health.update(outcome='reply' if value is not None else 'no_reply',
+                      completed_ts=int(self.wall()))
+        self.job['phase'] = 'finished'
+        self._change()
+
     def _prepare_units(self, units):
         self.job['requested_units'] = list(units)
         for unit in units:
@@ -1116,6 +1163,11 @@ class DeviceInventory:
     def cancel(self, reason='connection_lost'):
         with self.lock:
             if self.job['state'] == 'running':
+                if self.job.get('mode') == 'clear_errors':
+                    try:
+                        self.error_store.finish(self.job['requested_units'][0], reason)
+                    except OSError:
+                        LOG.error('Error-clear audit could not be saved; clearing disabled')
                 self.job['state'] = reason
                 self.job['phase'] = 'stopped'
                 if self.presence.get('state') in ('queued','waiting'):
@@ -1124,10 +1176,10 @@ class DeviceInventory:
                 self.job['finished_ts'] = int(self.wall())
                 for unit in self.job['requested_units']:
                     row = self.rows[unit]
-                    target = row['health'] if self.job['mode'] == 'health' else row
+                    target = row['health'] if self.job['mode'] in ('health','clear_errors') else row
                     if target['outcome'] == 'pending':
                         target['outcome'] = reason
-                        if self.job['mode'] == 'health':
+                        if self.job['mode'] in ('health','clear_errors'):
                             target['completed_ts'] = int(self.wall())
                             for read in target.get('reads',{}).values():
                                 if read['outcome'] == 'pending':
@@ -1140,6 +1192,8 @@ class DeviceInventory:
     def _result(self, token, value=None):
         unit, attr = token['unit'], token['attribute']
         row = self.rows[unit]
+        if self.job.get('mode') == 'clear_errors':
+            self._clear_result(token, value); return
         if attr in (4,7):
             health = row['health']
             read = health['reads']['summary' if attr == 4 else 'voltage']
@@ -1188,6 +1242,7 @@ class DeviceInventory:
                 self.cancel('discovery_' + self.presence['state']); return None
             if self.pending and self.pending.get('kind') != 'presence' and now >= self.pending['sent_at']+3:
                 self._result(self.pending)
+                if self.job['state'] != 'running': return None
                 self.diagnostics.bump('inventory_query_timeouts_total')
                 self.pending = None
             if self.reserved and now >= self.reserved['queued_at']+6:
@@ -1202,7 +1257,7 @@ class DeviceInventory:
             self.serial += 1
             self.reserved = {'token':self.serial, 'job':self.job['id'], 'unit':unit,
                              'attribute':attr, 'destination':self.interface_unit, 'queued_at':now,
-                             'kind':'presence' if unit is None else 'health' if attr in (4,7) else 'identity'}
+                             'kind':'presence' if unit is None else 'clear_errors' if attr == 8 else 'health' if attr in (4,7) else 'identity'}
             return dict(self.reserved)
 
     def release(self, token):
@@ -1211,7 +1266,7 @@ class DeviceInventory:
                 self.reserved = None
 
     def transmit(self, token, send):
-        from .cni_protocol import build_identity_request, build_presence_request, build_device_health_request, build_device_voltage_request
+        from .cni_protocol import build_identity_request, build_presence_request, build_device_health_request, build_device_voltage_request, build_device_error_clear_request
         with self.lock:
             if (not self.reserved or self.reserved['token'] != token['token'] or
                 self.job['state'] != 'running' or token['job'] != self.job['id'] or
@@ -1227,7 +1282,22 @@ class DeviceInventory:
             if token.get('kind') == 'presence':
                 self.presence['state'] = 'waiting'
                 self.presence['sent_ts'] = int(self.wall())
+            if token.get('kind') == 'clear_errors':
+                # A local audit failure must not be treated as a transport failure
+                # by CommandWorker: no socket write has happened at this point.
+                try:
+                    self.error_store.mark_sent(token['unit'])
+                except OSError:
+                    self.cancel('clear_persistence_failed'); return False
             try:
+                if token.get('kind') == 'clear_errors':
+                    send(build_device_error_clear_request(token['unit']))
+                    self.pending = None
+                    self.tasks.appendleft((token['unit'],4))
+                    self.job['phase'] = 'verifying'
+                    self.diagnostics.tx('device_error_clear', unit=token['unit'])
+                    self._change()
+                    return True
                 send(build_presence_request() if token.get('kind') == 'presence' else
                      (build_device_health_request(token['unit']) if token['attribute'] == 4 else
                       build_device_voltage_request(token['unit'])) if token.get('kind') == 'health' else
@@ -1258,7 +1328,7 @@ class DeviceInventory:
         """Keep one bounded alternative per active read without accepting its data."""
         with self.lock:
             p = self.pending
-            if (not p or p.get('kind') != 'health' or self.job['state'] != 'running' or
+            if (self.job.get('mode') == 'clear_errors' or not p or p.get('kind') != 'health' or self.job['state'] != 'running' or
                     self.clock() >= p['sent_at']+3 or self.clock() >= self.job['deadline'] or
                     (reply.unit,reply.destination,reply.attribute) !=
                     (p['unit'],p['destination'],p['attribute'])):
@@ -1314,7 +1384,7 @@ class DeviceInventory:
         with self.lock:
             job = {k:v for k,v in self.job.items() if k != 'deadline'}
             job['units_total'] = len(self.job['requested_units'])
-            job['units_finished'] = sum((self.rows[u].get('health',{}) if self.job.get('mode') == 'health'
+            job['units_finished'] = sum((self.rows[u].get('health',{}) if self.job.get('mode') in ('health','clear_errors')
                                         else self.rows[u]).get('outcome') != 'pending'
                                         for u in self.job['requested_units'])
             return {'schema':1, 'scope':'local_explicit_device_survey', 'version':self.version,
@@ -1329,8 +1399,8 @@ class DeviceInventory:
 class DeviceMonitor:
     """Configured, bounded monitoring via DeviceInventory's existing worker.
 
-    No sockets, timers or persistent mutable state. The site's reviewed roster
-    and baseline are an ordinary JSON file included in full application backups.
+    No sockets or timers. An optional atomic audit file holds verified baseline
+    overrides; the reviewed roster itself is never rewritten.
     """
     def __init__(self, inventory, config=None, clock=None, wall=None):
         import threading, time
@@ -1350,6 +1420,26 @@ class DeviceMonitor:
         self.last_scan, self.attempts, self.good, self.good_at = {}, {}, {}, {}
         self.valid_session = set()
         self.next_publish = 0
+        self.error_store = None
+
+    def enable_error_clearing(self, path):
+        # Invalid/unwritable audit state disables only clearing, not normal monitoring.
+        self.error_store = self.inventory.error_store = None
+        try:
+            self.error_store = DeviceErrorStore(path, self.config, wall=self.wall)
+            self.inventory.error_store = self.error_store
+        except (OSError, ValueError, TypeError, RecursionError):
+            LOG.error('Device error clearing disabled: audit state unavailable or invalid')
+
+    def clear_errors(self, spec, ready, readonly=False):
+        with self.lock:
+            if (not isinstance(spec,dict) or set(spec) != {'unit','request_id','confirm'} or
+                    spec['confirm'] is not True or type(spec['unit']) is not int or
+                    spec['unit'] not in self.devices or
+                    self.devices[spec['unit']]['capability'] != 'full' or
+                    type(spec['request_id']) is not int or not 1 <= spec['request_id'] <= 9007199254740991):
+                return False
+            return self.inventory.request_error_clear(spec['unit'],spec['request_id'],ready,readonly)
 
     @staticmethod
     def validate(config):
@@ -1444,9 +1534,11 @@ class DeviceMonitor:
                     if field in h: row[field]=h[field]
                 if h.get('diagnostics_available'):
                     from .cni_protocol import DEVICE_ERROR_FLAGS
-                    row['new_error_bits']=h['latched_errors_raw'] & ~d['baseline_errors'] & 255
+                    row['new_error_bits']=h['latched_errors_raw'] & ~(self.error_store.baseline(u,d['baseline_errors']) if self.error_store else d['baseline_errors']) & 255
                     row['new_errors']=[name for bit,name in enumerate(DEVICE_ERROR_FLAGS)
                                        if row['new_error_bits'] & (1 << bit)]
+                row['error_clear_enabled']=bool(self.error_store and self.error_store.enabled and d['capability']=='full')
+                if self.error_store: row['last_clear']=self.error_store.record(u)
                 result[u]=row
             return result
 
@@ -1459,7 +1551,123 @@ class DeviceMonitor:
             publisher.publish('cbus/bridge/device_monitor',json.dumps({
                 'schema':1,'enabled':bool(self.config),'devices':len(self.devices),'polled_devices':len(self.supported),
                 'refresh_pending':self.refresh_pending,'refresh_seconds':self.period,
+                'error_clear_enabled':bool(self.error_store and self.error_store.enabled),
                 'cycle_seconds_minimum':max(self.period,int(self.spacing*len(self.supported))),
                 'fresh':sum(v['status']=='fresh' for v in states.values())}),qos=0,retain=False)
             for u,row in states.items():
                 publisher.publish(f'cbus/bridge/devices/{u}/state',json.dumps(row,separators=(',',':')),qos=0,retain=False)
+
+
+class DeviceErrorStore:
+    """Bounded atomic audit and baseline overrides, bound to the reviewed roster.
+
+    Only verified zero readbacks replace a baseline. Uncertain writes are never
+    retried, including after restart. The caller serializes inventory operations.
+    """
+    ACTIVE = ('preflight','prepared','sent_unverified')
+
+    def __init__(self, path, config, wall=None):
+        import hashlib, json, threading, time
+        from pathlib import Path
+        self.lock = threading.RLock()
+        self.wall = wall or time.time
+        self.path = Path(path)
+        if not config: raise ValueError('Reviewed roster required')
+        self.roster_hash = hashlib.sha256(json.dumps(config,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        self.units = {str(d['unit']) for d in config['devices'] if d['capability'] == 'full'}
+        self.data = {'schema':1,'roster_hash':self.roster_hash,'last_request_id':0,'baselines':{},'records':{}}
+        self.enabled = True
+        if self.path.is_symlink(): raise ValueError('Symlinked audit path')
+        if self.path.exists():
+            if self.path.stat().st_size > 262144: raise ValueError('Audit too large')
+            self.data = json.loads(self.path.read_text())
+            self._validate()
+        # Recover incomplete attempts conservatively; never issue a command here.
+        for record in self.data['records'].values():
+            if record['outcome'] in self.ACTIVE:
+                record.update(outcome='interrupted_unverified' if record['outcome']=='sent_unverified'
+                              else 'interrupted_before_send', completed_ts=int(self.wall()))
+        self._save(self.data)
+
+    def _validate(self):
+        d=self.data
+        if (not isinstance(d,dict) or set(d) != {'schema','roster_hash','last_request_id','baselines','records'} or
+                type(d['schema']) is not int or d['schema'] != 1 or d['roster_hash'] != self.roster_hash or
+                type(d['last_request_id']) is not int or not 0 <= d['last_request_id'] <= 9007199254740991 or
+                not isinstance(d['baselines'],dict) or not isinstance(d['records'],dict) or
+                not set(d['baselines']) <= self.units or not set(d['records']) <= self.units or
+                any(type(v) is not int or v != 0 for v in d['baselines'].values())):
+            raise ValueError('Invalid error-clear audit')
+        allowed={'request_id','requested_ts','outcome','before_flags','after_flags','sent_ts','completed_ts'}
+        outcomes=set(self.ACTIVE) | {'verified_clear','flags_remaining','preflight_no_reply',
+            'unverified_no_reply','interrupted_unverified','interrupted_before_send','connection_lost',
+            'cancelled','survey_deadline','send_failed','clear_persistence_failed','audit_failed'}
+        for r in d['records'].values():
+            if (not isinstance(r,dict) or not {'request_id','requested_ts','outcome'} <= set(r) <= allowed or
+                    r['outcome'] not in outcomes or type(r['request_id']) is not int or
+                    not 1 <= r['request_id'] <= d['last_request_id'] or
+                    any(type(v) is not int for k,v in r.items() if k != 'outcome') or
+                    any(not 0 <= r[k] <= 255 for k in ('before_flags','after_flags') if k in r)):
+                raise ValueError('Invalid error-clear record')
+
+    def _save(self, data):
+        import json, os, tempfile
+        temp=None
+        try:
+            fd,temp=tempfile.mkstemp(prefix='.error-clear-',dir=self.path.parent)
+            with os.fdopen(fd,'w') as stream:
+                json.dump(data,stream,separators=(',',':'))
+                stream.flush(); os.fsync(stream.fileno())
+            os.replace(temp,self.path)
+            directory=os.open(self.path.parent,os.O_RDONLY | os.O_DIRECTORY)
+            try: os.fsync(directory)
+            finally: os.close(directory)
+        except OSError:
+            self.enabled=False
+            raise
+        finally:
+            if temp and os.path.exists(temp): os.unlink(temp)
+
+    def _commit(self, change):
+        import copy
+        with self.lock:
+            if not self.enabled: raise OSError('Audit disabled')
+            data=copy.deepcopy(self.data)
+            change(data)
+            try:
+                self._save(data)
+            except OSError:
+                for record in self.data['records'].values():
+                    if record['outcome'] in self.ACTIVE:
+                        record.update(outcome='audit_failed',completed_ts=int(self.wall()))
+                raise
+            self.data=data
+
+    def begin(self, unit, request_id):
+        def change(d):
+            if request_id <= d['last_request_id']: raise ValueError('Replayed request')
+            d['last_request_id']=request_id
+            d['records'][str(unit)]={'request_id':request_id,'requested_ts':int(self.wall()),'outcome':'preflight'}
+        self._commit(change)
+
+    def prepare(self, unit, before):
+        self._commit(lambda d:d['records'][str(unit)].update(outcome='prepared',before_flags=before))
+
+    def mark_sent(self, unit):
+        self._commit(lambda d:d['records'][str(unit)].update(outcome='sent_unverified',sent_ts=int(self.wall())))
+
+    def finish(self, unit, outcome, after=None):
+        def change(d):
+            r=d['records'][str(unit)]
+            if r['outcome'] not in self.ACTIVE: return
+            if outcome == 'verified_clear' and after == 0: d['baselines'][str(unit)]=0
+            r.update(outcome=outcome,completed_ts=int(self.wall()))
+            if after is not None: r['after_flags']=after
+        self._commit(change)
+
+    def baseline(self, unit, fallback):
+        with self.lock: return self.data['baselines'].get(str(unit),fallback)
+
+    def record(self, unit):
+        import copy
+        with self.lock: return copy.deepcopy(self.data['records'].get(str(unit)))
